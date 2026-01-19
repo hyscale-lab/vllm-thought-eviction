@@ -13,7 +13,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
 from threading import Thread
-from typing import Any, TypeAlias, TypeVar
+from typing import Any, TypeAlias, TypeVar, Optional, List
 
 import msgspec.msgpack
 import zmq
@@ -38,6 +38,7 @@ from vllm.v1.engine import (
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
+    UPDATE_MASK_REQUEST_TYPE,
 )
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
@@ -177,6 +178,20 @@ class EngineCoreClient(ABC):
     def save_sharded_state(
         self, path: str, pattern: str | None = None, max_size: int | None = None
     ) -> None:
+        raise NotImplementedError
+
+    def update_request_mask(self, request_id: str,
+                            evictable_token_ranges: list[tuple[int, int]]):
+        raise NotImplementedError
+
+    async def update_request_mask_async(
+        self, request_id: str, evictable_token_ranges: list[tuple[int, int]]
+    ):
+        raise NotImplementedError
+
+    async def get_request_l2_norms_async(
+        self, request_id: str, start_index: int = 0
+    ) -> Optional[List[float]]:
         raise NotImplementedError
 
     def collective_rpc(
@@ -803,6 +818,17 @@ class SyncMPClient(MPClient):
     ) -> None:
         self.call_utility("save_sharded_state", path, pattern, max_size)
 
+    def update_request_mask(self, request_id: str,
+                            evictable_token_ranges: list[tuple[int, int]]):
+        if not self.resources.engine_dead:
+            self._send_input(UPDATE_MASK_REQUEST_TYPE,
+                             (request_id, evictable_token_ranges))
+
+    async def get_request_l2_norms_async(
+        self, request_id: str, start_index: int = 0
+    ) -> Optional[List[float]]:
+        return self.engine_core.get_request_l2_norms(request_id, start_index)
+
 
 class AsyncMPClient(MPClient):
     """Asyncio-compatible client for multi-proc EngineCore."""
@@ -1012,6 +1038,29 @@ class AsyncMPClient(MPClient):
         return await self.call_utility_async(
             "collective_rpc", method, timeout, args, kwargs
         )
+        
+    async def update_request_mask_async(
+        self, request_id: str, evictable_token_ranges: list[tuple[int, int]]
+    ):
+        if not self.resources.engine_dead:
+            await self._send_input(UPDATE_MASK_REQUEST_TYPE,
+                                   (request_id, evictable_token_ranges))
+
+    async def get_request_l2_norms_async(
+        self, request_id: str, start_index: int = 0
+    ) -> Optional[List[float]]:
+        """Get L2 norms of attention keys for a running request via RPC."""
+        return await self.call_utility_async("get_request_l2_norms", request_id, start_index)
+
+    async def configure_l2_norms_async(
+        self,
+        l2_norm_layers: Optional[List[int]] = None,
+        skip_layers: Optional[List[int]] = None,
+        enabled: bool = True
+    ) -> dict:
+        """Configure L2 norm computation settings via RPC."""
+        return await self.call_utility_async("configure_l2_norms", 
+                                             l2_norm_layers, skip_layers, enabled)
 
 
 class DPAsyncMPClient(AsyncMPClient):

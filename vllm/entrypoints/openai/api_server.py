@@ -534,6 +534,10 @@ def build_app(args: Namespace) -> FastAPI:
     from vllm.entrypoints.pooling import register_pooling_api_routers
 
     register_pooling_api_routers(app)
+    
+    from vllm.entrypoints.openai.extensions.attention_tools import router as attention_router
+    
+    app.include_router(attention_router, prefix="")
 
     app.add_middleware(
         CORSMiddleware,

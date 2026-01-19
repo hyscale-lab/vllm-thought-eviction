@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from vllm._bc_linter import bc_linter_include
 
@@ -237,6 +237,9 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
+    
+    # Evictable Tokens
+    evictable_token_ranges_map: Optional[dict[str, list[tuple[int, int]]]] = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

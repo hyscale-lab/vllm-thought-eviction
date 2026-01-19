@@ -149,6 +149,10 @@ class Scheduler(SchedulerInterface):
 
         # req_id -> Request
         self.requests: dict[str, Request] = {}
+        
+        # req_id -> evictable ranges (managed by scheduler)
+        self.request_eviction_data: dict[str, list[tuple[int, int]]] = {}
+        
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -247,8 +251,46 @@ class Scheduler(SchedulerInterface):
                 max_num_kv_tokens=self.max_num_kv_tokens,
                 vllm_config=self.vllm_config,
             )
+            
+    def update_request_mask(self, request_id: str,
+                            evictable_token_ranges: list[tuple[int, int]]):
+        """
+        Stores the evictable token ranges for a request.
+        This is robust to race conditions where the update arrives before the
+        request is officially added. The data will be stored and picked up
+        when the request is scheduled.
+        """
+        self.request_eviction_data[request_id] = evictable_token_ranges
+        logger.debug(f"Stored evictable ranges for request {request_id}")
 
+    def _process_evictions(self) -> None:
+        """Process evictable token ranges and free corresponding physical blocks."""
+        if not self.request_eviction_data:
+            return
+
+        block_size = self.kv_cache_manager.block_size
+        if block_size is None:
+            return
+
+        for request_id, ranges in self.request_eviction_data.items():
+            blocks_to_free: set[int] = set()
+            for start, end in ranges:
+                # Calculate block index range fully covered by [start, end)
+                # start_block = ceil(start / block_size)
+                start_block = (start + block_size - 1) // block_size
+                # end_block = floor(end / block_size)
+                end_block = end // block_size
+                
+                if start_block < end_block:
+                    blocks_to_free.update(range(start_block, end_block))
+            
+            if blocks_to_free:
+                self.kv_cache_manager.free_blocks(request_id, list(blocks_to_free))
+                
     def schedule(self) -> SchedulerOutput:
+        # Process evictions first to free up blocks
+        self._process_evictions()
+        
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -731,7 +773,21 @@ class Scheduler(SchedulerInterface):
                         any_request.request_id
                     )
                 )
-
+        
+        # Collect evictable token ranges for scheduled requests
+        evictable_token_ranges_map: dict[str, list[tuple[int, int]]] = {}
+        all_scheduled_reqs = (scheduled_new_reqs + scheduled_resumed_reqs +
+                                scheduled_running_reqs)
+        logger.debug(f"All scheduled reqs: {[req.request_id for req in all_scheduled_reqs]}") # All scheduled reqs: ['chatcmpl-q1_c1_clustering']
+        logger.debug(f"Request Eviction Data: {self.request_eviction_data}")
+        for req in all_scheduled_reqs:
+            if ranges := self.request_eviction_data.get(req.request_id):
+                logger.debug(req.request_id)
+                logger.debug(ranges)
+                evictable_token_ranges_map[req.request_id] = ranges
+                
+        logger.debug(f"Evictable Token Ranges Map: {evictable_token_ranges_map}")
+        
         # Construct the scheduler output.
         if self.use_v2_model_runner:
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
@@ -780,6 +836,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+            evictable_token_ranges_map=evictable_token_ranges_map or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1506,7 +1563,9 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
-
+        
+        self.request_eviction_data.pop(request.request_id, None)
+        
         if not delay_free_blocks:
             self._free_blocks(request)
 

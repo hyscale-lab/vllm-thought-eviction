@@ -4,7 +4,7 @@
 
 import copy
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 import numpy as np
 import torch
@@ -215,7 +215,10 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool = True
-
+    
+    #L2 Norm Tracking 
+    compute_l2_norms: bool = False
+    request_ids: Optional[list[str]] = None
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
@@ -321,6 +324,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        request_ids: Optional[list[str]] = None,
+        compute_l2_norms: bool = False
     ) -> FlashAttentionMetadata:
         """
         fast_build disables AOT scheduling, used when there will be few
@@ -498,6 +503,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
+            request_ids=request_ids,
+            compute_l2_norms=compute_l2_norms,
         )
         return attn_metadata
 
@@ -646,7 +653,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(0)
-
+        
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
         # in KV cache.
@@ -763,6 +770,7 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=layer._v_scale,
             s_aux=self.sinks,
         )
+        
         return output
 
     def _forward_with_dcp(

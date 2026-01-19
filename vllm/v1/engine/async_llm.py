@@ -7,7 +7,7 @@ import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any, cast
+from typing import Any, cast, Optional, List, Tuple
 
 import torch
 
@@ -184,6 +184,50 @@ class AsyncLLM(EngineClient):
         else:
             self.profiler = None
 
+    async def update_request_mask(
+        self,
+        request_id: str,
+        evictable_token_ranges: list[tuple[int, int]],
+    ) -> None:
+        """Update the attention mask for a running request."""
+        if self.errored:
+            raise EngineDeadError()
+        # This will call the corresponding method on the EngineCoreClient,
+        # which needs to be implemented to send a message to the engine process.
+        await self.engine_core.update_request_mask_async(
+            request_id, evictable_token_ranges)
+            
+    async def evict_kv_blocks(
+        self,
+        request_id: str,
+        evictable_token_ranges: List[Tuple[int, int]]
+    ) -> None:
+        """Trigger physical eviction of KV cache blocks."""
+        await self.update_request_mask(request_id, evictable_token_ranges)
+    
+    async def get_request_l2_norms(
+        self,
+        request_id: str,
+        start_index: int = 0
+    ) -> Optional[List[float]]:
+        """
+        Get L2 norms of attention keys for a running request.
+        
+        This calls the EngineCore via RPC since the L2NormCache exists
+        in the EngineCore worker process, not the API server process.
+        
+        Returns:
+            List of L2 norms per token, or None if not available.
+        """
+        if self.errored:
+            raise EngineDeadError()
+        
+        try:
+            return await self.engine_core.get_request_l2_norms_async(request_id, start_index)
+        except Exception as e:
+            logger.debug(f"Could not get L2 norms for {request_id}: {e}")
+            return None
+        
     @classmethod
     def from_vllm_config(
         cls,
