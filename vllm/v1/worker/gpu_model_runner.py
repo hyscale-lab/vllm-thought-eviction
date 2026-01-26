@@ -683,6 +683,17 @@ class GPUModelRunner(
         self.layerwise_nvtx_hooks_registered = False
         
         self.l2_norm_cache = get_l2_norm_cache()
+        
+        strategy_map = {
+            "sink": self._replace_kv_caches_sink,
+            "zero": self._replace_kv_caches_zero,
+            "nearby": self._replace_kv_caches_nearby
+        }
+
+        self.replace_func = strategy_map.get(envs.VLLM_KV_REPLACEMENT_STRATEGY, None)
+        
+        # To remember evicted ranges within the block
+        self.evicted_ranges: dict[str, list[int]] = {}
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -847,6 +858,7 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            self.evicted_ranges.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1075,7 +1087,7 @@ class GPUModelRunner(
             for group_id, block_table_obj in enumerate(self.input_batch.block_table.block_tables):
                 block_size = block_table_obj.block_size
                 bt_np = block_table_obj.block_table.np
-                
+
                 for req_id, ranges in evicted_ranges.items():
                     req_index = self.input_batch.req_id_to_index.get(req_id)
                     if req_index is not None:
@@ -1107,24 +1119,40 @@ class GPUModelRunner(
                             # Fill fragmented memory with first token
                             # Acts as an attention sink
                             # Check if eviction operation is done previously
-                            if bt_np[req_index, start_block] != 0:
+                            if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []) and self.replace_func:
                                 sink_block_id = bt_np[req_index, 0]
                                 if start % block_size != 0:
-                                    self._replace_kv_caches(sink_block_id, 
+                                    self.replace_func(sink_block_id, 
                                                             start_block-1, 
-                                                            list(range(start%block_size, block_size)))
+                                                            list(range(start%block_size, block_size)),
+                                                            (start%block_size)-1,
+                                                            )
                                 
                                 if end % block_size != 0:
-                                    self._replace_kv_caches(sink_block_id, 
+                                    self.replace_func(sink_block_id, 
                                                             end_block, 
-                                                            list(range(0, end % block_size)))
-
+                                                            list(range(0, end % block_size)),
+                                                            end % block_size,
+                                                            )
+                                
+                                self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
+                                
+                            elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []) and self.replace_func:
+                                sink_block_id = bt_np[req_index, 0]
+                                self.replace_func(sink_block_id, 
+                                                  start_block-1, 
+                                                  list(range(start%block_size, end % block_size)),
+                                                  max((start%block_size)-1, 0),
+                                                )
+                                
+                                self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
+                                
                             if start_block < end_block:
                                 bt_np[req_index, start_block:end_block] = 0
                             
  
     
-    def _replace_kv_caches(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int]) -> None:
+    def _replace_kv_caches_sink(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
         """
         Replace fragmented evicted KV Cache with attention sink (First token)
         """
@@ -1132,6 +1160,8 @@ class GPUModelRunner(
             return 
         
         offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+        
+        logger.info("sink")
         
         for kv_cache in self.kv_caches:
             # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
@@ -1143,8 +1173,51 @@ class GPUModelRunner(
             # 2. Vectorized overwrite using advanced indexing
             # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
             # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
-            kv_cache[0, destination_block_id, offsets_gpu] = sink_k
-            kv_cache[1, destination_block_id, offsets_gpu] = sink_v
+            kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
+            kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
+    
+    def _replace_kv_caches_zero(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return 
+        
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+        
+        logger.info("zero")
+        
+        for kv_cache in self.kv_caches:
+
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = 0
+            kv_cache[1, destination_block_id, offsets_gpu] = 0
+
+    def _replace_kv_caches_nearby(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return 
+        
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+        
+        logger.info("nearby")
+        
+        for kv_cache in self.kv_caches:
+            # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
+            # 1. Extract the Sink K and V from slot 0 of the sink block
+            # Resulting shape: [num_kv_heads, head_size]
+            sink_k = kv_cache[0, destination_block_id, index]
+            sink_v = kv_cache[1, destination_block_id, index]
+
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
+            kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
 
     def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata]) -> None:
         # Iterate through the layers you want to track 
