@@ -256,7 +256,7 @@ class L2NormCache:
                 
                 # 2. Compute Norm per block FIRST to reduce size immediately
                 # [num_blocks, block_size]
-                block_norms = torch.norm(gathered_blocks.float(), p=2, dim=-1).min(dim=-1).values
+                block_norms = torch.norm(gathered_blocks.float(), p=2, dim=-1).max(dim=-1).values
                 
                 # 3. Flatten and slice to exact seq_len (Zero-copy view usually)
                 final_norms = block_norms.flatten()[:seq_len]
