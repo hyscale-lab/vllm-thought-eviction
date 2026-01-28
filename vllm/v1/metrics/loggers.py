@@ -897,6 +897,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.histogram_prefill_kv_computed_request = make_per_engine(
             histogram_prefill_kv_computed_request, engine_indexes, model_name
         )
+        
+        # Time spent per request for vllm replacement 
+        gauge_kv_eviction_overhead_time = self._gauge_cls(
+            name="vllm:kv_eviction_overhead_time",
+            documentation="Time spent in kv eviction for request.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_eviction_overhead_time = make_per_engine(
+            gauge_kv_eviction_overhead_time, engine_indexes, model_name
+        )
 
         #
         # KV Cache residency metrics
@@ -1039,6 +1050,8 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 scheduler_stats.num_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            
+            self.gauge_kv_eviction_overhead_time[engine_idx].set(scheduler_stats.kv_eviction_overhead_time)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
