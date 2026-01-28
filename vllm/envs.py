@@ -1642,7 +1642,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
-    "VLLM_KV_REPLACEMENT_STRATEGY": lambda: os.getenv("VLLM_KV_REPLACEMENT_STRATEGY", "zero"),
+    "VLLM_KV_REPLACEMENT_STRATEGY": lambda: os.getenv("VLLM_KV_REPLACEMENT_STRATEGY", None),
 }
 
 # --8<-- [end:env-vars-definition]

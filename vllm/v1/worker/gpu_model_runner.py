@@ -1122,33 +1122,34 @@ class GPUModelRunner(
                             # Fill fragmented memory with first token
                             # Acts as an attention sink
                             # Check if eviction operation is done previously
-                            if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []) and self.replace_func:
-                                sink_block_id = bt_np[req_index, 0]
-                                if start % block_size != 0:
+                            if self.replace_func:
+                                if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []):
+                                    sink_block_id = bt_np[req_index, 0]
+                                    if start % block_size != 0:
+                                        self.replace_func(sink_block_id, 
+                                                                start_block-1, 
+                                                                list(range(start%block_size, block_size)),
+                                                                (start%block_size)-1,
+                                                                )
+                                    
+                                    if end % block_size != 0:
+                                        self.replace_func(sink_block_id, 
+                                                                end_block, 
+                                                                list(range(0, end % block_size)),
+                                                                end % block_size,
+                                                                )
+                                    
+                                    self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
+                                    
+                                elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []):
+                                    sink_block_id = bt_np[req_index, 0]
                                     self.replace_func(sink_block_id, 
-                                                            start_block-1, 
-                                                            list(range(start%block_size, block_size)),
-                                                            (start%block_size)-1,
-                                                            )
-                                
-                                if end % block_size != 0:
-                                    self.replace_func(sink_block_id, 
-                                                            end_block, 
-                                                            list(range(0, end % block_size)),
-                                                            end % block_size,
-                                                            )
-                                
-                                self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
-                                
-                            elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []) and self.replace_func:
-                                sink_block_id = bt_np[req_index, 0]
-                                self.replace_func(sink_block_id, 
-                                                  start_block-1, 
-                                                  list(range(start%block_size, end % block_size)),
-                                                  max((start%block_size)-1, 0),
-                                                )
-                                
-                                self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
+                                                    start_block-1, 
+                                                    list(range(start%block_size, end % block_size)),
+                                                    max((start%block_size)-1, 0),
+                                                    )
+                                    
+                                    self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
                                 
                             if start_block < end_block:
                                 bt_np[req_index, start_block:end_block] = 0
