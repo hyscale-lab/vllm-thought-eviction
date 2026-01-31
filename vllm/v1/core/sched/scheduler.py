@@ -59,6 +59,16 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
+# PagedEviction imports - optional eviction support
+try:
+    from vllm.v1.core.paged_evict_config import PagedEvictConfig
+    from vllm.v1.core.paged_eviction_manager import PagedEvictionManager
+    PAGED_EVICTION_AVAILABLE = True
+except ImportError:
+    PAGED_EVICTION_AVAILABLE = False
+    PagedEvictConfig = None
+    PagedEvictionManager = None
+
 logger = init_logger(__name__)
 
 
@@ -222,6 +232,29 @@ class Scheduler(SchedulerInterface):
             hash_block_size=self.block_size,
             metrics_collector=self.kv_metrics_collector,
         )
+        
+        # PagedEviction: Initialize eviction manager if configured
+        self.paged_eviction_manager: PagedEvictionManager | None = None
+        self.paged_evict_config: PagedEvictConfig | None = None
+        if (
+            PAGED_EVICTION_AVAILABLE 
+            and hasattr(self.cache_config, 'paged_evict_config')
+            and self.cache_config.paged_evict_config is not None
+        ):
+            self.paged_evict_config = self.cache_config.paged_evict_config
+            # Estimate number of layers from kv_cache_config
+            num_layers = len(kv_cache_config.kv_cache_groups[0].layer_names) \
+                if kv_cache_config.kv_cache_groups else 32
+            self.paged_eviction_manager = PagedEvictionManager(
+                paged_evict_config=self.paged_evict_config,
+                block_size=self.block_size,
+                num_layers=num_layers,
+            )
+            logger.info(
+                f"PagedEviction enabled: budget={self.paged_evict_config.cache_budget}, "
+                f"method={self.paged_evict_config.evict_method}"
+            )
+        
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         self.perf_metrics: ModelMetrics | None = None
@@ -1454,6 +1487,9 @@ class Scheduler(SchedulerInterface):
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
+        # PagedEviction: Register request for eviction tracking
+        if self.paged_eviction_manager is not None:
+            self.paged_eviction_manager.register_request(request.request_id)
 
     def finish_requests(
         self, request_ids: str | Iterable[str], finished_status: RequestStatus
@@ -1509,6 +1545,10 @@ class Scheduler(SchedulerInterface):
 
         if not delay_free_blocks:
             self._free_blocks(request)
+        
+        # PagedEviction: Unregister completed request
+        if self.paged_eviction_manager is not None:
+            self.paged_eviction_manager.unregister_request(request_id)
 
         return kv_xfer_params
 
@@ -1940,3 +1980,21 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+    def evict_paged_blocks(self, block_ids: set[int]) -> None:
+        """
+        Evict specific blocks from the KV cache (PagedEviction API).
+        
+        This method is called by PagedEvictionManager when cache budget is
+        exceeded and blocks need to be freed. Unlike normal block eviction
+        which is based on prefix caching, this targets specific blocks
+        identified by L2-norm scoring.
+        
+        Args:
+            block_ids: Set of block IDs to evict from cache.
+        """
+        if not block_ids:
+            return
+        
+        logger.debug("PagedEviction: Evicting %d blocks: %s", len(block_ids), block_ids)
+        self.kv_cache_manager.evict_blocks(block_ids)

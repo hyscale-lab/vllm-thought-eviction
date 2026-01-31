@@ -575,6 +575,21 @@ class EngineArgs:
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
+    
+    # PagedEviction configuration
+    evict_cache_budget: int | None = None
+    """Maximum number of KV cache tokens per request. When exceeded, older tokens
+    are evicted based on L2-norm scoring. Set to None to disable eviction."""
+    
+    evict_cache_budget_ratio: float | None = None
+    """Ratio of tokens to retain (0.0-1.0). Budget is calculated dynamically as
+    current_tokens * ratio. Useful for streaming where context grows over time.
+    Takes precedence over evict_cache_budget if both are set."""
+    
+    evict_method: str = "value_l2_div_key_l2"
+    """Method for scoring tokens during eviction. Supported: 'value_l2_div_key_l2',
+    'value_l2', 'key_l2'. Lower scores are evicted first."""
+    
     tokens_only: bool = False
 
     def __post_init__(self):
@@ -943,6 +958,32 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
+        )
+        # PagedEviction CLI arguments
+        cache_group.add_argument(
+            "--evict-cache-budget",
+            type=int,
+            default=None,
+            help="Maximum number of KV cache tokens per request. When exceeded, "
+                 "older tokens are evicted based on L2-norm scoring. "
+                 "Set to enable PagedEviction."
+        )
+        cache_group.add_argument(
+            "--evict-method",
+            type=str,
+            default="value_l2_div_key_l2",
+            choices=["value_l2_div_key_l2", "value_l2", "key_l2"],
+            help="Method for scoring tokens during eviction. "
+                 "Lower scores are evicted first."
+        )
+        cache_group.add_argument(
+            "--evict-cache-budget-ratio",
+            type=float,
+            default=None,
+            help="Ratio of blocks to retain (0.0-1.0). Budget is calculated "
+                 "as current_blocks * ratio for block-level precision. "
+                 "E.g., 0.5 with 100 blocks keeps 50 blocks. "
+                 "Takes precedence over --evict-cache-budget."
         )
 
         # Multimodal related configs
@@ -1394,6 +1435,39 @@ class EngineArgs:
             self.kv_cache_dtype, model_config
         )
 
+        # Create PagedEvictConfig if eviction is enabled (either budget or ratio)
+        paged_evict_config = None
+        if self.evict_cache_budget is not None or self.evict_cache_budget_ratio is not None:
+            try:
+                from vllm.v1.core.paged_evict_config import PagedEvictConfig
+                # Ratio takes precedence - if set, use ratio mode with None budget
+                if self.evict_cache_budget_ratio is not None:
+                    paged_evict_config = PagedEvictConfig(
+                        cache_budget=None,
+                        cache_budget_ratio=self.evict_cache_budget_ratio,
+                        evict_method=self.evict_method,
+                    )
+                    logger.info(
+                        "PagedEviction enabled: ratio=%.2f (dynamic budget), method=%s",
+                        self.evict_cache_budget_ratio,
+                        self.evict_method,
+                    )
+                else:
+                    paged_evict_config = PagedEvictConfig(
+                        cache_budget=self.evict_cache_budget,
+                        cache_budget_ratio=None,
+                        evict_method=self.evict_method,
+                    )
+                    logger.info(
+                        "PagedEviction enabled: budget=%d (fixed), method=%s",
+                        self.evict_cache_budget,
+                        self.evict_method,
+                    )
+            except ImportError:
+                logger.warning(
+                    "PagedEviction requested but v1.core.paged_evict_config not available"
+                )
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1413,6 +1487,7 @@ class EngineArgs:
             mamba_block_size=self.mamba_block_size,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            paged_evict_config=paged_evict_config,
         )
 
         ray_runtime_env = None

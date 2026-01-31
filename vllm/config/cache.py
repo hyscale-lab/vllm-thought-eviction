@@ -160,6 +160,12 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    # PagedEviction configuration (optional)
+    paged_evict_config: Any = None
+    """Optional PagedEviction configuration for L2-norm based KV cache eviction.
+    When set to a PagedEvictConfig instance, enables cache budget enforcement
+    via selective token/block eviction during inference."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

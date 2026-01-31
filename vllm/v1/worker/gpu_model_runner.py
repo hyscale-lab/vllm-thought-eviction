@@ -180,6 +180,14 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
+# PagedEviction imports - optional eviction support
+try:
+    from vllm.v1.paged_eviction import PagedEvictionIntegration
+    PAGED_EVICTION_AVAILABLE = True
+except ImportError:
+    PAGED_EVICTION_AVAILABLE = False
+    PagedEvictionIntegration = None  # type: ignore
+
 logger = init_logger(__name__)
 
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
@@ -679,6 +687,11 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.layerwise_nvtx_hooks_registered = False
+        
+        # PagedEviction: Integration layer for decode-time eviction
+        # Will be initialized with manager from scheduler during set_kv_cache_config
+        self.eviction_integration: "PagedEvictionIntegration | None" = None
+        self._paged_eviction_enabled = False
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -686,6 +699,86 @@ class GPUModelRunner(
             draft_config = self.speculative_config.draft_model_config
             if draft_config is None or draft_config.max_model_len is None:
                 self.effective_drafter_max_model_len = self.max_model_len
+
+    def set_eviction_manager(
+        self,
+        paged_eviction_manager: "Any | None" = None,
+    ) -> None:
+        """
+        Set up PagedEviction integration with the manager from scheduler.
+        
+        This method should be called after the scheduler is initialized
+        with a PagedEvictionManager. It creates t PagedEvictionIntegration
+        layer that provides hooks for decode-time eviction.
+        
+        Args:
+            paged_eviction_manager: The PagedEvictionManager from scheduler.
+                If None, eviction is disabled.
+        """
+        if not PAGED_EVICTION_AVAILABLE:
+            self._paged_eviction_enabled = False
+            return
+        
+        if paged_eviction_manager is None:
+            self._paged_eviction_enabled = False
+            return
+        
+        block_size = self.cache_config.block_size or 16
+        self.eviction_integration = PagedEvictionIntegration(
+            paged_eviction_manager=paged_eviction_manager,
+            kv_cache_manager=None,  # Will be set by caller if available
+            block_size=block_size,
+        )
+        self._paged_eviction_enabled = self.eviction_integration.enabled
+        if self._paged_eviction_enabled:
+            logger.info("PagedEviction enabled in GPUModelRunner")
+
+    def _maybe_evict_kv_cache(
+        self,
+        scheduler_output: "SchedulerOutput",
+        req_ids: list[str],
+    ) -> None:
+        """
+        Check if decode-time eviction is needed and trigger eviction.
+        
+        This method is called after each model forward pass when eviction
+        is enabled. It checks each request's KV cache usage against the
+        configured budget and evicts blocks if needed.
+        
+        Args:
+            scheduler_output: The scheduler output containing request info.
+            req_ids: List of request IDs in the current batch.
+        """
+        if self.eviction_integration is None:
+            return
+        
+        num_reqs = self.input_batch.num_reqs
+        block_size = self.cache_config.block_size or 16
+        
+        # Check each request for eviction
+        for i, req_id in enumerate(req_ids):
+            if i >= num_reqs:
+                break
+            
+            # Get computed tokens from input_batch
+            num_tokens = self.input_batch.num_computed_tokens_cpu[i]
+            num_blocks = (num_tokens + block_size - 1) // block_size
+            
+            # Check if eviction is needed
+            if self.eviction_integration.should_evict(req_id, num_blocks):
+                # Get blocks to evict
+                result = self.eviction_integration.maybe_evict(
+                    request_id=req_id,
+                    num_blocks_used=num_blocks,
+                    kv_cache=self.kv_caches[0] if hasattr(self, 'kv_caches') and self.kv_caches else None,
+                    block_ids=None,  # Block IDs would come from KVCacheManager
+                )
+                if result and result.evicted_block_ids:
+                    logger.debug(
+                        "Evicted %d blocks for request %s",
+                        len(result.evicted_block_ids),
+                        req_id,
+                    )
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -3290,6 +3383,10 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+        
+        # PagedEviction: Check if decode-time eviction is needed
+        if self._paged_eviction_enabled and self.eviction_integration is not None:
+            self._maybe_evict_kv_cache(scheduler_output, req_ids)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
