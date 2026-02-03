@@ -192,10 +192,6 @@ class Request:
     @property
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
-    
-    @property
-    def num_evicted_tokens(self) -> int:
-        return self.num_evicted_tokens
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (

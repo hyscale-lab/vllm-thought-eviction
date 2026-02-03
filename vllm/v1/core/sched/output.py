@@ -61,7 +61,7 @@ class NewRequestData:
             pooling_params=request.pooling_params,
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
-            num_dropped_tokens=request.num_evicted_tokens,
+            num_evicted_tokens=request.num_evicted_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,

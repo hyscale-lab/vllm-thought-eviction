@@ -189,7 +189,7 @@ class ModelRunnerOutput:
     
     kv_eviction_overhead_time: float = 0.0
     
-    num_evicted_tokens_list: list[int]
+    num_evicted_tokens_list: list[int] = field(default_factory=list)
 
 
 # ModelRunnerOutput wrapper for async scheduling.

@@ -867,13 +867,9 @@ class GPUModelRunner(
         def is_same_range(list1, list2):
             if len(list1) != len(list2):
                 return False
-                
-
-            for range1, range2 in zip(list1, list2):
-                if range1[0] != range2[0] or range1[1] != range2[1]:
-                    return False 
-                    
-            return True
+            t1 = tuple(tuple(r) for r in list1)
+            t2 = tuple(tuple(r) for r in list2)
+            return t1 == t2
         
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
@@ -1132,34 +1128,14 @@ class GPUModelRunner(
                             elif len(past_mask) < current_total_len:
                                 extension = np.ones(current_total_len - len(past_mask), dtype=bool)
                                 past_mask = np.concatenate([past_mask, extension])
-
-                            num_survivors = self._compact_kv_caches(req_index, past_mask, bt_np, block_size, evicted_ranges)
                             self.past_evicted_mask[req_id] = past_mask
+                            
+                            num_survivors = self._compact_kv_caches(req_index, past_mask, bt_np, block_size, ranges)
                             self.num_evicted_tokens_list[req_id] = current_total_len - num_survivors
                             
                             num_blocks_needed = (num_survivors + block_size - 1) // block_size
-                            
-                            bt_np[req_index, num_blocks_needed:] = 0
-                            
-                            if group_id < len(req_state.block_ids):
-                                block_ids_list = req_state.block_ids[group_id]
-                                    
-                                # Mark as evicted in the Python list
-                                for block_idx in range(num_blocks_needed, len(block_ids_list)):
-                                    if block_idx < len(block_ids_list):
-                                        block_ids_list[block_idx] = 0
 
-                        # # Update the active block table (numpy)
-                        # # We use 0 instead of -1 because FlashAttention kernels may crash
-                        # # if they encounter -1 in the block table (Illegal Memory Access).
-                        # # We rely on the attention mask (updated via update_request_mask)
-                        # # to prevent the model from attending to this garbage block.
-                        # for start, end in ranges:
-                        #     start_block = (start + block_size - 1) // block_size
-                        #     end_block = end // block_size
-                                
-                        #     if start_block < end_block:
-                        #         bt_np[req_index, start_block:end_block] = 0
+                            self.evicted_ranges[req_id] = ranges
                                 
         self.kv_eviction_overhead_time = time.monotonic() - start_time
     
@@ -1173,7 +1149,6 @@ class GPUModelRunner(
             past_mask[max(0, start):min(end, len(past_mask))] = False
         
         new_survivors = np.where(past_mask)[0]
-        num_new_survivors = len(new_survivors)
         
         current_phys_blocks = bt_np[req_index][bt_np[req_index] != 0]
         
@@ -1181,6 +1156,7 @@ class GPUModelRunner(
         # that were present at the start of this function call.
         # searchsorted is O(log N) and very fast for this.
         rel_indices = np.searchsorted(current_survivors, new_survivors)
+        num_new_survivors = len(rel_indices)  
         
         src_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in rel_indices], 
                                 device=self.device, dtype=torch.long)
@@ -1188,9 +1164,9 @@ class GPUModelRunner(
                                 device=self.device, dtype=torch.long)
         
         # 5. FIND DESTINATION: Pack them into the earliest blocks
-        dst_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in range(num_new_survivors)], 
+        dst_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in range(len(rel_indices))], 
                                 device=self.device, dtype=torch.long)
-        dst_offsets = torch.tensor([i % block_size for i in range(num_new_survivors)], 
+        dst_offsets = torch.tensor([i % block_size for i in range(len(rel_indices))], 
                                 device=self.device, dtype=torch.long)
 
         # Execute Copy
@@ -1212,9 +1188,7 @@ class GPUModelRunner(
             return 
         
         offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
-        
-        logger.info("sink")
-        
+                
         for kv_cache in self.kv_caches:
             # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
             # 1. Extract the Sink K and V from slot 0 of the sink block
@@ -1236,9 +1210,7 @@ class GPUModelRunner(
             return 
         
         offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
-        
-        logger.info("zero")
-        
+                
         for kv_cache in self.kv_caches:
 
             # 2. Vectorized overwrite using advanced indexing
@@ -1255,9 +1227,7 @@ class GPUModelRunner(
             return 
         
         offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
-        
-        logger.info("nearby")
-        
+                
         for kv_cache in self.kv_caches:
             # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
             # 1. Extract the Sink K and V from slot 0 of the sink block
@@ -1604,7 +1574,7 @@ class GPUModelRunner(
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
         np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices]-self.input_batch.num_evicted_tokens_cpu[req_indices],
+            self.input_batch.num_computed_tokens_cpu[req_indices] - self.input_batch.num_evicted_tokens_cpu[req_indices],
             arange,
             out=positions_np,
         )
@@ -1697,7 +1667,7 @@ class GPUModelRunner(
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         self.seq_lens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] - self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] - self.input_batch.num_evicted_tokens_cpu[:num_reqs] + num_scheduled_tokens
         )
         # Fill unused with 0 for full cuda graph mode.
         self.seq_lens.np[num_reqs:].fill(0)

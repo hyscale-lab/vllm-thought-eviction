@@ -302,7 +302,7 @@ class KVCacheManager:
         # The number of computed tokens is the number of computed tokens plus
         # the new prefix caching hits
         num_local_computed_tokens = (
-            request.num_computed_tokens + num_new_computed_tokens
+            request.num_computed_tokens + num_new_computed_tokens - request.num_evicted_tokens
         )
         total_computed_tokens = min(
             num_local_computed_tokens + num_external_computed_tokens,

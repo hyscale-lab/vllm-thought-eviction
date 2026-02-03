@@ -279,9 +279,11 @@ class Scheduler(SchedulerInterface):
             # Blocks to free is just the tail end of the request
             num_tokens = req.num_tokens 
             num_evicted_tokens = req.num_evicted_tokens
+            num_survivors = num_tokens - num_evicted_tokens
             
+            num_blocks_needed = (num_survivors + block_size - 1) // block_size
             
-            blocks_to_free = list(range((num_remaining / block_size)+1, num_tokens / block_size))
+            blocks_to_free = list(range(num_blocks_needed, (num_tokens // block_size)+1))
             
             if blocks_to_free:
                 self.kv_cache_manager.free_blocks(request_id, blocks_to_free)
