@@ -188,6 +188,8 @@ class ModelRunnerOutput:
     cudagraph_stats: CUDAGraphStat | None = None
     
     kv_eviction_overhead_time: float = 0.0
+    
+    num_evicted_tokens_list: list[int]
 
 
 # ModelRunnerOutput wrapper for async scheduling.
@@ -241,4 +243,4 @@ def make_empty_encoder_model_runner_output(
     )
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={})
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[], req_id_to_index={}, num_evicted_tokens_list=[])

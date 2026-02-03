@@ -274,20 +274,32 @@ class Scheduler(SchedulerInterface):
         if block_size is None:
             return
 
-        for request_id, ranges in self.request_eviction_data.items():
-            blocks_to_free: set[int] = set()
-            for start, end in ranges:
-                # Calculate block index range fully covered by [start, end)
-                # start_block = ceil(start / block_size)
-                start_block = (start + block_size - 1) // block_size
-                # end_block = floor(end / block_size)
-                end_block = end // block_size
-                
-                if start_block < end_block:
-                    blocks_to_free.update(range(start_block, end_block))
+
+        for request_id, req in enumerate(self.running):
+            # Blocks to free is just the tail end of the request
+            num_tokens = req.num_tokens 
+            num_evicted_tokens = req.num_evicted_tokens
+            
+            
+            blocks_to_free = list(range((num_remaining / block_size)+1, num_tokens / block_size))
             
             if blocks_to_free:
-                self.kv_cache_manager.free_blocks(request_id, list(blocks_to_free))
+                self.kv_cache_manager.free_blocks(request_id, blocks_to_free)
+
+        # for request_id, ranges in self.request_eviction_data.items():
+        #     blocks_to_free: set[int] = set()
+        #     for start, end in ranges:
+        #         # Calculate block index range fully covered by [start, end)
+        #         # start_block = ceil(start / block_size)
+        #         start_block = (start + block_size - 1) // block_size
+        #         # end_block = floor(end / block_size)
+        #         end_block = end // block_size
+                
+        #         if start_block < end_block:
+        #             blocks_to_free.update(range(start_block, end_block))
+            
+        #     if blocks_to_free:
+        #         self.kv_cache_manager.free_blocks(request_id, list(blocks_to_free))
                 
     def schedule(self) -> SchedulerOutput:
         # Process evictions first to free up blocks
@@ -924,6 +936,7 @@ class Scheduler(SchedulerInterface):
         new_block_ids: list[tuple[list[int], ...] | None] = []
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
+        num_evicted_tokens: list[int] = []
         num_output_tokens: list[int] = []
         resumed_req_ids = set()
 
@@ -957,6 +970,7 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            num_evicted_tokens.append(req.num_evicted_tokens)
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -966,6 +980,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            num_evicted_tokens=num_evicted_tokens,
         )
 
     def _try_schedule_encoder_inputs(
@@ -1158,6 +1173,7 @@ class Scheduler(SchedulerInterface):
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
+        num_evicted_tokens_list = model_runner_output.num_evicted_tokens_list
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
@@ -1211,6 +1227,7 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
+            request.num_evicted_tokens = num_evicted_tokens_list[req_index]
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)

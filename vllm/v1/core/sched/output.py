@@ -39,6 +39,7 @@ class NewRequestData:
     pooling_params: PoolingParams | None
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
+    num_evicted_tokens: int
     lora_request: LoRARequest | None
     prompt_embeds: "torch.Tensor | None" = None
 
@@ -60,6 +61,7 @@ class NewRequestData:
             pooling_params=request.pooling_params,
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
+            num_dropped_tokens=request.num_evicted_tokens,
             lora_request=request.lora_request,
             prompt_embeds=request.prompt_embeds,
             prefill_token_ids=prefill_token_ids,
@@ -126,6 +128,7 @@ class CachedRequestData:
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
+    num_evicted_tokens: list[int]
 
     # Version of dataclass repr with token IDs obfuscated.
     def anon_repr(self) -> str:
@@ -176,6 +179,7 @@ class CachedRequestData:
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],
+            num_evicted_tokens=[],
         )
 
 

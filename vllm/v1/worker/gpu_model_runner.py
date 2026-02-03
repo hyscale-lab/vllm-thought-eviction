@@ -693,9 +693,17 @@ class GPUModelRunner(
         self.replace_func = strategy_map.get(envs.VLLM_KV_REPLACEMENT_STRATEGY, None)
         
         # To remember evicted ranges within the block
-        self.evicted_ranges: dict[str, list[int]] = {}
+        self.evicted_ranges: dict[str, list[list[int]]] = {}
         
         self.kv_eviction_overhead_time: float = 0.0
+        
+        # To remember previous eviction ranges {request_id: evitctable_ranges}
+        self.request_slot_mapping = {}
+        
+        # To remember number of evicted tokens, updated every cycle
+        self.num_evicted_tokens_list: dict[str, int] = {}
+        
+        self.past_evicted_mask: dict[str, np.ndarray] = {}
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -856,11 +864,25 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        def is_same_range(list1, list2):
+            if len(list1) != len(list2):
+                return False
+                
+
+            for range1, range2 in zip(list1, list2):
+                if range1[0] != range2[0] or range1[1] != range2[1]:
+                    return False 
+                    
+            return True
+        
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
             self.evicted_ranges.pop(req_id, None)
+            self.request_slot_mapping.pop(req_id, None)
+            self.num_evicted_tokens_list.pop(req_id, None)
+            self.past_evicted_mask.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -965,6 +987,7 @@ class GPUModelRunner(
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
+            num_evicted_tokens = req_data.num_evicted_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_id in req_data.resumed_req_ids
             num_output_tokens = req_data.num_output_tokens[i]
@@ -1052,9 +1075,10 @@ class GPUModelRunner(
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = num_computed_tokens
+            self.input_batch.num_evicted_tokens_cpu[req_index] = num_evicted_tokens
             if new_block_ids is not None:
                 self.input_batch.block_table.append_row(new_block_ids, req_index)
-
+                
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
             if not is_last_rank:
@@ -1092,69 +1116,93 @@ class GPUModelRunner(
                 bt_np = block_table_obj.block_table.np
 
                 for req_id, ranges in evicted_ranges.items():
+                    if is_same_range(self.evicted_ranges.get(req_id, []), ranges):
+                        continue
+                    
                     req_index = self.input_batch.req_id_to_index.get(req_id)
                     if req_index is not None:
-                        # Update CachedRequestState to reflect eviction
-                        # This prevents stale (freed) block IDs from being re-added to the
-                        # input batch if the request is preempted or re-scheduled.
                         if req_id in self.requests:
                             req_state = self.requests[req_id]
+                            current_total_len = req_state.num_computed_tokens
+                            past_mask = self.past_evicted_mask.get(req_id, None)
+                            
+                            # Extension since seq_len increases
+                            if past_mask is None:
+                                past_mask = np.ones(current_total_len, dtype=bool)
+                            elif len(past_mask) < current_total_len:
+                                extension = np.ones(current_total_len - len(past_mask), dtype=bool)
+                                past_mask = np.concatenate([past_mask, extension])
+
+                            num_survivors = self._compact_kv_caches(req_index, past_mask, bt_np, block_size, evicted_ranges)
+                            self.past_evicted_mask[req_id] = past_mask
+                            self.num_evicted_tokens_list[req_id] = current_total_len - num_survivors
+                            
+                            num_blocks_needed = (num_survivors + block_size - 1) // block_size
+                            
+                            bt_np[req_index, num_blocks_needed:] = 0
+                            
                             if group_id < len(req_state.block_ids):
                                 block_ids_list = req_state.block_ids[group_id]
-                                for start, end in ranges:
-                                    start_block = (start + block_size - 1) // block_size
-                                    end_block = end // block_size
                                     
-                                    # Mark as evicted in the Python list
-                                    for block_idx in range(start_block, end_block):
-                                        if block_idx < len(block_ids_list):
-                                            block_ids_list[block_idx] = 0
+                                # Mark as evicted in the Python list
+                                for block_idx in range(num_blocks_needed, len(block_ids_list)):
+                                    if block_idx < len(block_ids_list):
+                                        block_ids_list[block_idx] = 0
 
-                        # Update the active block table (numpy)
-                        # We use 0 instead of -1 because FlashAttention kernels may crash
-                        # if they encounter -1 in the block table (Illegal Memory Access).
-                        # We rely on the attention mask (updated via update_request_mask)
-                        # to prevent the model from attending to this garbage block.
-                        for start, end in ranges:
-                            start_block = (start + block_size - 1) // block_size
-                            end_block = end // block_size
-                            
-                            # Fill fragmented memory with first token
-                            # Acts as an attention sink
-                            # Check if eviction operation is done previously
-                            if self.replace_func:
-                                if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []):
-                                    sink_block_id = bt_np[req_index, 0]
-                                    if start % block_size != 0:
-                                        self.replace_func(sink_block_id, 
-                                                                start_block-1, 
-                                                                list(range(start%block_size, block_size)),
-                                                                (start%block_size)-1,
-                                                                )
-                                    
-                                    if end % block_size != 0:
-                                        self.replace_func(sink_block_id, 
-                                                                end_block, 
-                                                                list(range(0, end % block_size)),
-                                                                end % block_size,
-                                                                )
-                                    
-                                    self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
-                                    
-                                elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []):
-                                    sink_block_id = bt_np[req_index, 0]
-                                    self.replace_func(sink_block_id, 
-                                                    start_block-1, 
-                                                    list(range(start%block_size, end % block_size)),
-                                                    max((start%block_size)-1, 0),
-                                                    )
-                                    
-                                    self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
+                        # # Update the active block table (numpy)
+                        # # We use 0 instead of -1 because FlashAttention kernels may crash
+                        # # if they encounter -1 in the block table (Illegal Memory Access).
+                        # # We rely on the attention mask (updated via update_request_mask)
+                        # # to prevent the model from attending to this garbage block.
+                        # for start, end in ranges:
+                        #     start_block = (start + block_size - 1) // block_size
+                        #     end_block = end // block_size
                                 
-                            if start_block < end_block:
-                                bt_np[req_index, start_block:end_block] = 0
-        self.kv_eviction_overhead_time = time.monotonic() - start_time       
- 
+                        #     if start_block < end_block:
+                        #         bt_np[req_index, start_block:end_block] = 0
+                                
+        self.kv_eviction_overhead_time = time.monotonic() - start_time
+    
+    def _compact_kv_caches(self, req_index: int, past_mask: np.ndarray, bt_np: np.ndarray, block_size: int, evicted_ranges: list[tuple[int, int]]) -> None:
+        """
+        Compaction of KV Cache
+        """
+        current_survivors = np.where(past_mask)[0]
+        
+        for start, end in evicted_ranges:
+            past_mask[max(0, start):min(end, len(past_mask))] = False
+        
+        new_survivors = np.where(past_mask)[0]
+        num_new_survivors = len(new_survivors)
+        
+        current_phys_blocks = bt_np[req_index][bt_np[req_index] != 0]
+        
+        # This finds the position of each 'new_survivor' token in the list of tokens 
+        # that were present at the start of this function call.
+        # searchsorted is O(log N) and very fast for this.
+        rel_indices = np.searchsorted(current_survivors, new_survivors)
+        
+        src_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in rel_indices], 
+                                device=self.device, dtype=torch.long)
+        src_offsets = torch.tensor([i % block_size for i in rel_indices], 
+                                device=self.device, dtype=torch.long)
+        
+        # 5. FIND DESTINATION: Pack them into the earliest blocks
+        dst_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in range(num_new_survivors)], 
+                                device=self.device, dtype=torch.long)
+        dst_offsets = torch.tensor([i % block_size for i in range(num_new_survivors)], 
+                                device=self.device, dtype=torch.long)
+
+        # Execute Copy
+        for kv_cache in self.kv_caches:
+            # Advanced indexing: [Layer, Physical_Block, Slot_Offset, Heads, Dims]
+            # Copying all heads and hidden dims at once [:]
+            kv_cache[0, dst_blocks, dst_offsets] = kv_cache[0, src_blocks, src_offsets]
+            kv_cache[1, dst_blocks, dst_offsets] = kv_cache[1, src_blocks, src_offsets]
+            
+        return num_new_survivors
+        
+
     
     def _replace_kv_caches_sink(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
         """
@@ -1556,7 +1604,7 @@ class GPUModelRunner(
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
         np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices],
+            self.input_batch.num_computed_tokens_cpu[req_indices]-self.input_batch.num_evicted_tokens_cpu[req_indices],
             arange,
             out=positions_np,
         )
@@ -1649,7 +1697,7 @@ class GPUModelRunner(
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         self.seq_lens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] - self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
         )
         # Fill unused with 0 for full cuda graph mode.
         self.seq_lens.np[num_reqs:].fill(0)
@@ -3705,6 +3753,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 kv_eviction_overhead_time=self.kv_eviction_overhead_time,
+                num_evicted_tokens_list=[self.num_evicted_tokens_list.get(k, 0) for k in self.input_batch.req_ids],
             )
 
         if not self.use_async_scheduling:

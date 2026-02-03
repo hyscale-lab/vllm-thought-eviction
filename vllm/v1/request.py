@@ -136,6 +136,9 @@ class Request:
             self.block_hashes = self.get_hash_new_full_blocks()
 
         self.skip_reading_prefix_cache = self.get_skip_reading_prefix_cache()
+        
+        # Number of eviction tokens 
+        self.num_evicted_tokens: int = 0
 
     @classmethod
     def from_engine_core_request(
@@ -189,6 +192,10 @@ class Request:
     @property
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
+    
+    @property
+    def num_evicted_tokens(self) -> int:
+        return self.num_evicted_tokens
 
     def get_skip_reading_prefix_cache(self) -> bool:
         if (

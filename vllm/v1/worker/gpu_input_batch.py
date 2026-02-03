@@ -268,6 +268,15 @@ class InputBatch:
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
+        
+        self.num_evicted_tokens_cpu_tensor = torch.zeros(
+            (max_num_reqs,),
+            device='cpu',
+            dtype=torch.int32,
+            pin_memory=pin_memory
+        )
+        self.num_evicted_tokens_cpu = self.num_evicted_tokens_cpu_tensor.numpy()
+        
 
     @property
     def req_ids(self) -> list[str]:
