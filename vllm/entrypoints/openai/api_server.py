@@ -250,6 +250,32 @@ async def show_version():
     return JSONResponse(content=ver)
 
 
+@router.get("/v1/paged_eviction/stats")
+async def get_paged_eviction_stats(
+    raw_request: Request,
+    request_id: str | None = None,
+):
+    """Get paged eviction statistics from the engine.
+    
+    Args:
+        request_id: Optional request ID for per-request stats.
+    
+    Returns:
+        JSON with eviction statistics or error message.
+    """
+    engine = engine_client(raw_request)
+    
+    if hasattr(engine, "get_paged_eviction_stats"):
+        stats = await engine.get_paged_eviction_stats(request_id)
+        return JSONResponse({"success": True, "stats": stats})
+    else:
+        return JSONResponse({
+            "success": False,
+            "error": "Paged eviction stats not supported by current engine"
+        })
+
+
+
 def load_log_config(log_config_file: str | None) -> dict | None:
     if not log_config_file:
         return None

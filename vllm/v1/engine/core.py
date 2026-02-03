@@ -608,6 +608,18 @@ class EngineCore:
     ) -> list[_R]:
         return self.model_executor.collective_rpc(method, timeout, args, kwargs)
 
+    def get_paged_eviction_stats(self, request_id: str | None = None) -> dict:
+        """Get paged eviction statistics from the scheduler.
+        
+        Args:
+            request_id: Optional request ID for per-request stats.
+        
+        Returns:
+            Dictionary with eviction statistics.
+        """
+        return self.scheduler.get_paged_eviction_stats(request_id)
+
+
     def preprocess_add_request(self, request: EngineCoreRequest) -> tuple[Request, int]:
         """Preprocess the request.
 

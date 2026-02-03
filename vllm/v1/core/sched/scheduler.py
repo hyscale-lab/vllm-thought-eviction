@@ -387,6 +387,45 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            # PagedEviction: Check if eviction is needed before allocating new blocks
+            if self.paged_eviction_manager is not None:
+                current_tokens = request.num_computed_tokens
+                current_blocks = (current_tokens + self.block_size - 1) // self.block_size
+                
+                if self.paged_eviction_manager.should_evict(
+                    request.request_id, current_tokens
+                ):
+                    logger.info(f"[EVICTION DEBUG] Eviction triggered for {request.request_id}, tokens={current_tokens}")
+                    # Get block IDs from kv_cache_manager
+                    try:
+                        block_ids_tuple = self.kv_cache_manager.get_block_ids(
+                            request.request_id
+                        )
+                        # Use first group's block IDs (for single KV cache group)
+                        block_ids = list(block_ids_tuple[0]) if block_ids_tuple else []
+                    except Exception as e:
+                        logger.debug(
+                            "[EVICTION] Could not get block IDs for request %s: %s",
+                            request.request_id, e
+                        )
+                        block_ids = []
+                    
+                    if block_ids:
+                        # Get blocks to evict
+                        blocks_to_evict = self.paged_eviction_manager.get_blocks_to_evict(
+                            request_id=request.request_id,
+                            current_tokens=current_tokens,
+                            num_total_blocks=current_blocks,
+                            block_ids=block_ids,
+                        )
+                        
+                        if blocks_to_evict:
+                            logger.info(
+                                "[EVICTION] Evicting %d blocks for request %s",
+                                len(blocks_to_evict), request.request_id
+                            )
+                            self.kv_cache_manager.evict_blocks(blocks_to_evict)
+
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
                 while True:
@@ -1129,6 +1168,24 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # PagedEviction: Update L2-norms from worker output
+        if (
+            self.paged_eviction_manager is not None
+            and model_runner_output.paged_eviction_stats is not None
+        ):
+            stats = model_runner_output.paged_eviction_stats
+            try:
+                for req_id, layer_stats in stats.items():
+                    logger.info(f"[EVICTION DEBUG] Received stats for {req_id} ({len(layer_stats)} layers)")
+                    for layer_idx, scores in layer_stats.items():
+                        self.paged_eviction_manager.l2norm_manager.update_block_l2norms(
+                            request_id=req_id,
+                            layer_idx=layer_idx,
+                            l2_norms=scores,
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to update eviction stats: {e}")
+
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -1998,3 +2055,30 @@ class Scheduler(SchedulerInterface):
         
         logger.debug("PagedEviction: Evicting %d blocks: %s", len(block_ids), block_ids)
         self.kv_cache_manager.evict_blocks(block_ids)
+
+    def get_paged_eviction_stats(self, request_id: str | None = None) -> dict:
+        """
+        Get paged eviction statistics.
+        
+        Args:
+            request_id: Optional request ID for per-request stats.
+                       If None, returns global stats.
+        
+        Returns:
+            Dictionary with eviction statistics.
+        """
+        if self.paged_eviction_manager is None:
+            return {"enabled": False}
+        
+        stats = self.paged_eviction_manager.get_stats()
+        stats["enabled"] = True
+        
+        # Add config info
+        if self.paged_evict_config is not None:
+            stats["config"] = {
+                "cache_budget": self.paged_evict_config.cache_budget,
+                "cache_budget_ratio": self.paged_evict_config.cache_budget_ratio,
+                "evict_method": self.paged_evict_config.evict_method,
+            }
+        
+        return stats

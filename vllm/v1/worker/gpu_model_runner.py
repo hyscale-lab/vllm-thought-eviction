@@ -399,6 +399,9 @@ class GPUModelRunner(
             model_config
         )
 
+        # PagedEviction: Track stats to return to scheduler
+        self._paged_eviction_stats: dict[str, dict[int, list[float]]] | None = None
+
         if self.model_config.is_encoder_decoder:
             # Maximum length of the encoder input, only for encoder-decoder
             # models.
@@ -689,9 +692,21 @@ class GPUModelRunner(
         self.layerwise_nvtx_hooks_registered = False
         
         # PagedEviction: Integration layer for decode-time eviction
-        # Will be initialized with manager from scheduler during set_kv_cache_config
         self.eviction_integration: "PagedEvictionIntegration | None" = None
         self._paged_eviction_enabled = False
+        
+        # Initialize if config is present (Worker-side initialization)
+        if self.cache_config.paged_evict_config is not None:
+            from vllm.v1.paged_eviction.integration import PagedEvictionIntegration
+            self.eviction_integration = PagedEvictionIntegration(
+                paged_eviction_manager=None,
+                kv_cache_manager=None,
+                block_size=self.cache_config.block_size,
+                paged_evict_config=self.cache_config.paged_evict_config,
+            )
+            self._paged_eviction_enabled = self.eviction_integration.enabled
+            if self._paged_eviction_enabled:
+                logger.info("PagedEviction enabled in GPUModelRunner (via config)")
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -733,52 +748,59 @@ class GPUModelRunner(
         if self._paged_eviction_enabled:
             logger.info("PagedEviction enabled in GPUModelRunner")
 
-    def _maybe_evict_kv_cache(
+    def _compute_and_report_eviction_stats(
         self,
         scheduler_output: "SchedulerOutput",
         req_ids: list[str],
     ) -> None:
-        """
-        Check if decode-time eviction is needed and trigger eviction.
-        
-        This method is called after each model forward pass when eviction
-        is enabled. It checks each request's KV cache usage against the
-        configured budget and evicts blocks if needed.
-        
-        Args:
-            scheduler_output: The scheduler output containing request info.
-            req_ids: List of request IDs in the current batch.
-        """
         if self.eviction_integration is None:
             return
         
         num_reqs = self.input_batch.num_reqs
-        block_size = self.cache_config.block_size or 16
+        if num_reqs == 0:
+            return
+
+        # Prepare stats container
+        eviction_stats = {}
         
-        # Check each request for eviction
+        # Iterate through requests and compute stats
         for i, req_id in enumerate(req_ids):
-            if i >= num_reqs:
-                break
-            
-            # Get computed tokens from input_batch
-            num_tokens = self.input_batch.num_computed_tokens_cpu[i]
-            num_blocks = (num_tokens + block_size - 1) // block_size
-            
-            # Check if eviction is needed
-            if self.eviction_integration.should_evict(req_id, num_blocks):
-                # Get blocks to evict
-                result = self.eviction_integration.maybe_evict(
-                    request_id=req_id,
-                    num_blocks_used=num_blocks,
-                    kv_cache=self.kv_caches[0] if hasattr(self, 'kv_caches') and self.kv_caches else None,
-                    block_ids=None,  # Block IDs would come from KVCacheManager
-                )
-                if result and result.evicted_block_ids:
-                    logger.debug(
-                        "Evicted %d blocks for request %s",
-                        len(result.evicted_block_ids),
-                        req_id,
-                    )
+            # Check if this request is tracked for eviction
+            if req_id in scheduler_output.num_scheduled_tokens: # Basic check
+                # Determine current block usage from scheduler output (logical)
+                # But here in the worker, we have PHYSICAL blocks.
+                # integration.compute_eviction_metrics needs PHYSICAL blocks to compute norms,
+                # but might return stats corresponding to logical blocks (as a list).
+                
+                # Get current block IDs for this request
+                try:
+                    # Access first block table
+                    # Note: We assume single-layer KV cache group for now similar to vLLM logic
+                    if self.input_batch.block_table:
+                        bt = self.input_batch.block_table[0]
+                        if req_id in self.input_batch.req_id_to_index:
+                            row_idx = self.input_batch.req_id_to_index[req_id]
+                            # Use numpy array from CPU mirror for fast access
+                            n_blocks = bt.num_blocks_per_row[row_idx]
+                            current_block_ids = bt.block_table.np[row_idx, :n_blocks].tolist()
+                            
+                            # Compute metrics
+                            req_stats = self.eviction_integration.compute_eviction_metrics(
+                                request_id=req_id,
+                                num_blocks_used=n_blocks, # Virtual/Logical blocks (approx)
+                                kv_cache=self.kv_caches[0] if hasattr(self, 'kv_caches') and self.kv_caches else None,
+                                block_ids=current_block_ids, # Physical blocks (for eviction delta)
+                            )
+                            
+                            if req_stats:
+                                eviction_stats.update(req_stats)
+                                logger.info(f"[EVICTION DEBUG] Worker computed stats for {req_id}")
+                            
+                except Exception as e:
+                    logger.warning(f"Failed to compute eviction metrics for {req_id}: {e}")
+                
+        if eviction_stats:
+             self._paged_eviction_stats = eviction_stats
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -3386,7 +3408,7 @@ class GPUModelRunner(
         
         # PagedEviction: Check if decode-time eviction is needed
         if self._paged_eviction_enabled and self.eviction_integration is not None:
-            self._maybe_evict_kv_cache(scheduler_output, req_ids)
+            self._compute_and_report_eviction_stats(scheduler_output, req_ids)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -3608,7 +3630,9 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                paged_eviction_stats=self._paged_eviction_stats,
             )
+            self._paged_eviction_stats = None
 
         if not self.use_async_scheduling:
             return output

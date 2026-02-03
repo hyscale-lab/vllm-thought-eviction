@@ -795,6 +795,22 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
+    async def get_paged_eviction_stats(
+        self, request_id: str | None = None
+    ) -> dict:
+        """Get paged eviction statistics from the engine.
+        
+        Args:
+            request_id: Optional request ID for per-request stats.
+        
+        Returns:
+            Dictionary with eviction statistics.
+        """
+        return await self.engine_core.call_utility_async(
+            "get_paged_eviction_stats", request_id
+        )
+
+
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""
         start_time = time.time()

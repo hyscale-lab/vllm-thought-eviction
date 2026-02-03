@@ -187,6 +187,9 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # PagedEviction stats: request_id -> layer_idx -> list_of_scores
+    paged_eviction_stats: dict[str, dict[int, list[float]]] | None = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
