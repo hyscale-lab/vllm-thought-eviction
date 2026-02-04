@@ -493,6 +493,7 @@ class InputBatch:
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
         self.spec_token_ids[req_index].clear()
+        self.num_evicted_tokens_cpu_tensor[req_index] = 0
 
         # LoRA
         lora_id = self.request_lora_mapping[req_index]
