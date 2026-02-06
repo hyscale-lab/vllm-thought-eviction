@@ -931,6 +931,51 @@ class Worker(WorkerBase):
         if self.profiler is not None:
             self.profiler.shutdown()
 
+    def get_request_l2_norms(
+        self, request_id: str, start_index: int = 0
+    ) -> list[float] | None:
+        """Get L2 norms for a request from worker-local cache."""
+        try:
+            from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
+
+            cache = get_l2_norm_cache()
+            return cache.get_norms(request_id, start_index)
+        except Exception as e:
+            logger.warning("Worker %d: Could not get L2 norms for %s: %s",
+                           self.rank, request_id, e)
+            return None
+
+    def configure_l2_norms(
+        self,
+        l2_norm_layers: list[int] | None = None,
+        skip_layers: list[int] | None = None,
+        enabled: bool = True,
+    ) -> dict:
+        """Configure L2 norm computation in worker-local cache."""
+        try:
+            from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
+
+            cache = get_l2_norm_cache()
+            if l2_norm_layers is not None:
+                cache.set_l2_norm_layers(l2_norm_layers)
+            if skip_layers is not None:
+                cache.set_skip_layers(skip_layers)
+            if enabled:
+                cache.enable()
+            else:
+                cache.disable()
+
+            return {
+                "rank": self.rank,
+                "enabled": cache.is_enabled,
+                "l2_norm_layers": cache.l2_norm_layers,
+                "skip_layers": cache.skip_layers,
+            }
+        except Exception as e:
+            logger.error("Worker %d: Could not configure L2 norms: %s",
+                         self.rank, e)
+            return {"rank": self.rank, "error": str(e)}
+
 
 def init_worker_distributed_environment(
     vllm_config: VllmConfig,

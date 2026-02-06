@@ -171,6 +171,21 @@ class WorkerBase:
         """Clean up resources held by the worker."""
         return
 
+    def get_request_l2_norms(
+        self, request_id: str, start_index: int = 0
+    ) -> list[float] | None:
+        """Get L2 norms for a request from worker-local cache."""
+        raise NotImplementedError
+
+    def configure_l2_norms(
+        self,
+        l2_norm_layers: list[int] | None = None,
+        skip_layers: list[int] | None = None,
+        enabled: bool = True,
+    ) -> dict:
+        """Configure L2 norm computation in worker-local cache."""
+        raise NotImplementedError
+
 
 class WorkerWrapperBase:
     """
