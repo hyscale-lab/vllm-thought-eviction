@@ -190,6 +190,7 @@ class SchedulerStats:
     perf_stats: PerfStats | None = None
     
     kv_eviction_overhead_time: float = 0.0
+    l2_norm_overhead_time: float = 0.0
 
 @dataclass
 class RequestStateStats:

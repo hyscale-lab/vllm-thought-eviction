@@ -908,6 +908,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_kv_eviction_overhead_time = make_per_engine(
             gauge_kv_eviction_overhead_time, engine_indexes, model_name
         )
+        
+        gauge_l2_norm_overhead_time = self._gauge_cls(
+            name="vllm:l2_norm_overhead_time",
+            documentation="Time spent in L2 norms for request.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_l2_norm_overhead_time = make_per_engine(
+            gauge_l2_norm_overhead_time, engine_indexes, model_name
+        )
 
         #
         # KV Cache residency metrics
@@ -1052,6 +1062,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
             
             self.gauge_kv_eviction_overhead_time[engine_idx].set(scheduler_stats.kv_eviction_overhead_time)
+            self.gauge_l2_norm_overhead_time[engine_idx].set(scheduler_stats.l2_norm_overhead_time)
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
