@@ -590,6 +590,9 @@ class EngineArgs:
     """Method for scoring tokens during eviction. Supported: 'value_l2_div_key_l2',
     'value_l2', 'key_l2'. Lower scores are evicted first."""
     
+    evict_sampled_layers: list[int] | None = None
+    """List of layer indices to compute L2 norms for. If None, defaults to layer 0."""
+    
     tokens_only: bool = False
 
     def __post_init__(self):
@@ -984,6 +987,15 @@ class EngineArgs:
                  "as current_blocks * ratio for block-level precision. "
                  "E.g., 0.5 with 100 blocks keeps 50 blocks. "
                  "Takes precedence over --evict-cache-budget."
+        )
+
+        cache_group.add_argument(
+            "--evict-sampled-layers",
+            type=int,
+            nargs="+",
+            default=None,
+            help="List of layer indices to sample for L2 norm computation. "
+                 "If not specified, defaults to None (usually layer 0)."
         )
 
         # Multimodal related configs
@@ -1446,6 +1458,7 @@ class EngineArgs:
                         cache_budget=None,
                         cache_budget_ratio=self.evict_cache_budget_ratio,
                         evict_method=self.evict_method,
+                        sampled_layers=self.evict_sampled_layers,
                     )
                     logger.info(
                         "PagedEviction enabled: ratio=%.2f (dynamic budget), method=%s",
@@ -1457,6 +1470,7 @@ class EngineArgs:
                         cache_budget=self.evict_cache_budget,
                         cache_budget_ratio=None,
                         evict_method=self.evict_method,
+                        sampled_layers=self.evict_sampled_layers,
                     )
                     logger.info(
                         "PagedEviction enabled: budget=%d (fixed), method=%s",

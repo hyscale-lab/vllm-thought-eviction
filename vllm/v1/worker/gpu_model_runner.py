@@ -763,6 +763,16 @@ class GPUModelRunner(
         # Prepare stats container
         eviction_stats = {}
         
+        # Determine layers to sample
+        sampled_layers = [0]
+        if (self.cache_config.paged_evict_config is not None and 
+            self.cache_config.paged_evict_config.sampled_layers is not None):
+            sampled_layers = self.cache_config.paged_evict_config.sampled_layers
+        
+        # Iteratively check if we have enough layers in kv_caches
+        # self.kv_caches should be populated by bind_kv_cache
+        num_avail_layers = len(self.kv_caches) if hasattr(self, 'kv_caches') else 0
+        
         # Iterate through requests and compute stats
         for i, req_id in enumerate(req_ids):
             # Check if this request is tracked for eviction
@@ -784,17 +794,27 @@ class GPUModelRunner(
                             n_blocks = bt.num_blocks_per_row[row_idx]
                             current_block_ids = bt.block_table.np[row_idx, :n_blocks].tolist()
                             
-                            # Compute metrics
-                            req_stats = self.eviction_integration.compute_eviction_metrics(
-                                request_id=req_id,
-                                num_blocks_used=n_blocks, # Virtual/Logical blocks (approx)
-                                kv_cache=self.kv_caches[0] if hasattr(self, 'kv_caches') and self.kv_caches else None,
-                                block_ids=current_block_ids, # Physical blocks (for eviction delta)
-                            )
+                            # Compute metrics for each sampled layer
+                            req_layer_stats = {}
                             
-                            if req_stats:
-                                eviction_stats.update(req_stats)
-                                logger.info(f"[EVICTION DEBUG] Worker computed stats for {req_id}")
+                            for layer_idx in sampled_layers:
+                                if layer_idx >= num_avail_layers:
+                                    continue
+                                    
+                                layer_stats = self.eviction_integration.compute_eviction_metrics(
+                                    request_id=req_id,
+                                    num_blocks_used=n_blocks, # Virtual/Logical blocks (approx)
+                                    kv_cache=self.kv_caches[layer_idx],
+                                    block_ids=current_block_ids, # Physical blocks (for eviction delta)
+                                    layer_idx=layer_idx,
+                                )
+                                
+                                if layer_stats and req_id in layer_stats:
+                                    req_layer_stats.update(layer_stats[req_id])
+                            
+                            if req_layer_stats:
+                                eviction_stats[req_id] = req_layer_stats
+                                logger.info(f"[EVICTION DEBUG] Worker computed stats for {req_id} (layers: {list(req_layer_stats.keys())})")
                             
                 except Exception as e:
                     logger.warning(f"Failed to compute eviction metrics for {req_id}: {e}")

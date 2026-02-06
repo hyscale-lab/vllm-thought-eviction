@@ -280,7 +280,7 @@ class PagedEvictionIntegration:
         block_ids: list[int],
     ) -> List[float]:
         """
-        Compute L2-norms for blocks from KV cache.
+        Compute L2-norms for blocks from KV cache using vectorized operations.
         
         Args:
             kv_cache: KV cache tensor.
@@ -289,34 +289,39 @@ class PagedEvictionIntegration:
         Returns:
              List of scores corresponding to block_ids order.
         """
+        if not block_ids:
+            return []
+
         # Compute L2 norms directly from KV cache
         # kv_cache shape: [2, num_blocks, block_size, num_kv_heads, head_size]
         key_cache = kv_cache[0]  # [num_blocks, block_size, num_kv_heads, head_size]
         value_cache = kv_cache[1]
         
-        scores = []
-        for block_id in block_ids:
-            if block_id < 0 or block_id >= key_cache.shape[0]:
-                scores.append(0.0) # Should not happen?
-                continue
-            
-            # Get key and value for this block
-            key_block = key_cache[block_id]  # [block_size, num_kv_heads, head_size]
-            value_block = value_cache[block_id]
-            
-            # Compute L2 norms
-            key_l2 = torch.norm(key_block.float(), dim=-1).mean().item()
-            value_l2 = torch.norm(value_block.float(), dim=-1).mean().item()
-            
-            # Score
-            if key_l2 > 0:
-                score = value_l2 / key_l2
-            else:
-                score = float('inf')  # Avoid division by zero
-            
-            scores.append(score)
-            
-        return scores
+        # Convert block_ids to tensor for indexing
+        # Ensure we are on the same device as cache
+        block_indices = torch.tensor(block_ids, device=key_cache.device, dtype=torch.long)
+        
+        # Gather blocks: [num_selected_blocks, block_size, num_kv_heads, head_size]
+        # We index the first dimension (block index)
+        key_blocks = key_cache[block_indices]
+        value_blocks = value_cache[block_indices]
+        
+        # Compute L2 norms: [num_selected_blocks]
+        # 1. Norm over hidden dim (last dim) -> [num_selected_blocks, block_size, num_kv_heads]
+        # 2. Mean over block tokens and heads -> [num_selected_blocks]
+        # Note: distinct from paper which might do sum, but we follow previous implementation's mean()
+        key_l2s = torch.norm(key_blocks.float(), dim=-1).mean(dim=(1, 2))
+        value_l2s = torch.norm(value_blocks.float(), dim=-1).mean(dim=(1, 2))
+        
+        # Calculate scores vectorized
+        # Avoid division by zero
+        scores = torch.where(
+            key_l2s > 0, 
+            value_l2s / key_l2s, 
+            torch.tensor(float('inf'), device=key_cache.device, dtype=key_l2s.dtype)
+        )
+        
+        return scores.tolist()
     
     def get_stats(self) -> dict[str, Any]:
         """Get eviction statistics."""

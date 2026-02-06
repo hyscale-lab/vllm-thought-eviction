@@ -40,6 +40,7 @@ class PagedEvictConfig:
     cache_budget_ratio: float | None = None  # e.g., 0.5 = keep 50% of tokens
     topk_blocks: int = -1
     initial_blocks: int = 1
+    sampled_layers: list[int] | None = None
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -105,6 +106,15 @@ class PagedEvictConfig:
             raise ValueError(
                 f"initial_blocks must be non-negative, got {self.initial_blocks}"
             )
+
+        # Validate sampled_layers
+        if self.sampled_layers is not None:
+             if not isinstance(self.sampled_layers, list):
+                 raise ValueError(f"sampled_layers must be a list of integers, got {type(self.sampled_layers)}")
+             if any(not isinstance(i, int) for i in self.sampled_layers):
+                 raise ValueError("sampled_layers must be a list of integers")
+             if any(i < 0 for i in self.sampled_layers):
+                 raise ValueError("sampled_layers indices must be non-negative")
     
     def get_budget_blocks(self, num_blocks: int, block_size: int = 16) -> int:
         """Calculate the effective budget in blocks based on current block count.
@@ -157,7 +167,8 @@ class PagedEvictConfig:
             f"evict_method='{self.evict_method}', "
             f"{budget_info}, "
             f"topk_blocks={self.topk_blocks}, "
-            f"initial_blocks={self.initial_blocks})"
+            f"initial_blocks={self.initial_blocks}, "
+            f"sampled_layers={self.sampled_layers})"
         )
     
     @classmethod
@@ -171,6 +182,7 @@ class PagedEvictConfig:
             cache_budget_ratio=config_dict.get("cache_budget_ratio"),
             topk_blocks=config_dict.get("topk_blocks", -1),
             initial_blocks=config_dict.get("initial_blocks", 1),
+            sampled_layers=config_dict.get("sampled_layers", None),
         )
     
     def to_dict(self) -> dict:
@@ -183,4 +195,5 @@ class PagedEvictConfig:
             "cache_budget_ratio": self.cache_budget_ratio,
             "topk_blocks": self.topk_blocks,
             "initial_blocks": self.initial_blocks,
+            "sampled_layers": self.sampled_layers,
         }
