@@ -284,27 +284,51 @@ class EngineCore:
         """Delegates the mask update to the scheduler."""
         self.scheduler.update_request_mask(request_id, evictable_token_ranges)
 
-    def get_request_l2_norms(self, request_id: str, start_index: int = 0) -> Optional[List[float]]:
+    def get_request_l2_norms(self, request_id: str,
+                             start_index: int = 0) -> Optional[List[float]]:
         """Get L2 norms of attention keys for a running request.
         
-        This method runs in the EngineCore process where the L2NormCache exists.
-        
-        Returns:
-            List of L2 norms per token, or None if not available.
+        Fetches norms from all workers via collective RPC and aggregates them.
+        In tensor parallel mode, results are averaged across ranks.
         """
         try:
-            from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
-            cache = get_l2_norm_cache()
-            norms = cache.get_norms(request_id, start_index)
-            return norms
+            all_norms = self.collective_rpc("get_request_l2_norms",
+                                           args=(request_id, start_index))
+
+            valid_results = [n for n in all_norms if n is not None and len(n) > 0]
+            if not valid_results:
+                # Fallback to local cache (handles TP=1 or cases where EngineCore
+                # has local cache populated)
+                from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
+                return get_l2_norm_cache().get_norms(request_id, start_index)
+
+            # Check for length consistency
+            if not all(len(n) == len(valid_results[0]) for n in valid_results):
+                logger.warning(
+                    "L2 norms from different workers have inconsistent lengths")
+                # Truncate to minimum length
+                min_len = min(len(n) for n in valid_results)
+                valid_results = [n[:min_len] for n in valid_results]
+
+            # Average across ranks
+            num_ranks = len(valid_results)
+            seq_len = len(valid_results[0])
+            aggregated = []
+            for i in range(seq_len):
+                token_norm = sum(res[i] for res in valid_results) / num_ranks
+                aggregated.append(token_norm)
+
+            return aggregated
+
         except Exception as e:
             logger.warning(f"Could not get L2 norms for {request_id}: {e}")
             return None
-    
-    def configure_l2_norms(self, l2_norm_layers: Optional[List[int]] = None,
+
+    def configure_l2_norms(self,
+                           l2_norm_layers: Optional[List[int]] = None,
                            skip_layers: Optional[List[int]] = None,
                            enabled: bool = True) -> dict:
-        """Configure L2 norm computation settings.
+        """Configure L2 norm computation settings across all workers.
         
         Args:
             l2_norm_layers: Specific layer indices to compute L2 norms for.
@@ -315,22 +339,30 @@ class EngineCore:
             dict: Current configuration after update.
         """
         try:
+            # Broadcast to all workers
+            self.collective_rpc("configure_l2_norms",
+                               args=(l2_norm_layers, skip_layers, enabled))
+
+            # Also update local cache for TP=1 or consistency
             from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
             cache = get_l2_norm_cache()
-            
+
             if l2_norm_layers is not None:
                 cache.set_l2_norm_layers(l2_norm_layers)
-                logger.info(f"L2 norm computation restricted to layers: {l2_norm_layers}")
-            
+                logger.info(
+                    f"L2 norm computation restricted to layers: {l2_norm_layers}"
+                )
+
             if skip_layers is not None:
                 cache.set_skip_layers(skip_layers)
-                logger.info(f"L2 norm computation skipping layers: {skip_layers}")
-            
+                logger.info(
+                    f"L2 norm computation skipping layers: {skip_layers}")
+
             if enabled:
                 cache.enable()
             else:
                 cache.disable()
-            
+
             return {
                 "enabled": cache.is_enabled,
                 "l2_norm_layers": cache.l2_norm_layers,
