@@ -14,6 +14,7 @@ import ssl
 from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any
+from pydantic import BaseModel
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -35,7 +36,9 @@ logger = init_logger("vllm.entrypoints.api_server")
 
 app = FastAPI()
 engine = None
-
+class UpdateMaskRequest(BaseModel):
+    request_id: str
+    evictable_token_ranges: list[tuple[int, int]]
 
 @app.get("/health")
 async def health() -> Response:
@@ -54,6 +57,24 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     return await _generate(request_dict, raw_request=request)
+
+@app.post("/v1/attention/update_mask")
+async def update_attention_mask(request: Request):
+    """
+    Endpoint to update the attention mask for a running request.
+    Used for real-time KV cache eviction with FlexAttention.
+    """
+    json_request = await request.json()
+    mask_request = UpdateMaskRequest.parse_obj(json_request)
+    
+    # The engine is typically available on the request state or as a global
+    engine = request.app.state.engine
+    
+    logger.info(mask_request.evictable_token_ranges)
+
+    await engine.update_request_mask(mask_request.request_id,
+                                     mask_request.evictable_token_ranges)
+    return JSONResponse({"success": True})
 
 
 @with_cancellation

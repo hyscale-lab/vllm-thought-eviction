@@ -440,7 +440,8 @@ class InputProcessor:
                 " passed to vLLM; use the request_id field."
             )
         request.external_req_id = request.request_id
-        request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
+        # request.request_id = f"{request.external_req_id}-{random_uuid():.8}"
+        request.request_id = f"{request.external_req_id}"
 
     def process_inputs(
         self,

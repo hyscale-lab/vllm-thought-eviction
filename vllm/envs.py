@@ -255,6 +255,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_KV_REPLACEMENT_STRATEGY: str | None = None
 
 
 def get_default_cache_root():
@@ -1641,6 +1642,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    "VLLM_KV_REPLACEMENT_STRATEGY": lambda: os.getenv("VLLM_KV_REPLACEMENT_STRATEGY", None),
 }
 
 # --8<-- [end:env-vars-definition]

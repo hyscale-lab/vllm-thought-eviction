@@ -126,6 +126,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     AsyncModelRunnerOutput,
@@ -167,6 +168,7 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.workspace import lock_workspace
+from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
 
 from .utils import (
     AttentionGroup,
@@ -679,6 +681,22 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.layerwise_nvtx_hooks_registered = False
+        
+        self.l2_norm_cache = get_l2_norm_cache()
+        
+        strategy_map = {
+            "sink": self._replace_kv_caches_sink,
+            "zero": self._replace_kv_caches_zero,
+            "nearby": self._replace_kv_caches_nearby
+        }
+
+        self.replace_func = strategy_map.get(envs.VLLM_KV_REPLACEMENT_STRATEGY, None)
+        
+        # To remember evicted ranges within the block
+        self.evicted_ranges: dict[str, list[int]] = {}
+        
+        self.kv_eviction_overhead_time: float = 0.0
+        self.l2_norm_overhead_time: float = 0.0
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -843,6 +861,7 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+            self.evicted_ranges.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1063,6 +1082,175 @@ class GPUModelRunner(
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+        torch.cuda.synchronize()
+        start_time = time.perf_counter()
+        # Process evictions: Invalidate evicted blocks in the block table.
+        # This ensures that the model does not attend to the freed blocks.
+        evicted_ranges = scheduler_output.evictable_token_ranges_map
+        if evicted_ranges:
+            for group_id, block_table_obj in enumerate(self.input_batch.block_table.block_tables):
+                block_size = block_table_obj.block_size
+                bt_np = block_table_obj.block_table.np
+
+                for req_id, ranges in evicted_ranges.items():
+                    req_index = self.input_batch.req_id_to_index.get(req_id)
+                    if req_index is not None:
+                        # Update CachedRequestState to reflect eviction
+                        # This prevents stale (freed) block IDs from being re-added to the
+                        # input batch if the request is preempted or re-scheduled.
+                        if req_id in self.requests:
+                            req_state = self.requests[req_id]
+                            if group_id < len(req_state.block_ids):
+                                block_ids_list = req_state.block_ids[group_id]
+                                for start, end in ranges:
+                                    start_block = (start + block_size - 1) // block_size
+                                    end_block = end // block_size
+                                    
+                                    # Mark as evicted in the Python list
+                                    for block_idx in range(start_block, end_block):
+                                        if block_idx < len(block_ids_list):
+                                            block_ids_list[block_idx] = 0
+
+                        # Update the active block table (numpy)
+                        # We use 0 instead of -1 because FlashAttention kernels may crash
+                        # if they encounter -1 in the block table (Illegal Memory Access).
+                        # We rely on the attention mask (updated via update_request_mask)
+                        # to prevent the model from attending to this garbage block.
+                        for start, end in ranges:
+                            start_block = (start + block_size - 1) // block_size
+                            end_block = end // block_size
+                            
+                            # Fill fragmented memory with first token
+                            # Acts as an attention sink
+                            # Check if eviction operation is done previously
+                            if self.replace_func:
+                                if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []):
+                                    sink_block_id = bt_np[req_index, 0]
+                                    if start % block_size != 0:
+                                        self.replace_func(sink_block_id, 
+                                                                start_block-1, 
+                                                                list(range(start%block_size, block_size)),
+                                                                (start%block_size)-1,
+                                                                )
+                                    
+                                    if end % block_size != 0:
+                                        self.replace_func(sink_block_id, 
+                                                                end_block, 
+                                                                list(range(0, end % block_size)),
+                                                                end % block_size,
+                                                                )
+                                    
+                                    self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
+                                    
+                                elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []):
+                                    sink_block_id = bt_np[req_index, 0]
+                                    self.replace_func(sink_block_id, 
+                                                    start_block-1, 
+                                                    list(range(start%block_size, end % block_size)),
+                                                    max((start%block_size)-1, 0),
+                                                    )
+                                    
+                                    self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
+                                
+                            if start_block < end_block:
+                                bt_np[req_index, start_block:end_block] = 0
+        
+        torch.cuda.synchronize()
+        self.kv_eviction_overhead_time = time.perf_counter() - start_time       
+ 
+    
+    def _replace_kv_caches_sink(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return 
+        
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+        
+        logger.info("sink")
+        
+        for kv_cache in self.kv_caches:
+            # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
+            # 1. Extract the Sink K and V from slot 0 of the sink block
+            # Resulting shape: [num_kv_heads, head_size]
+            sink_k = kv_cache[0, sink_block_id, 0]
+            sink_v = kv_cache[1, sink_block_id, 0]
+
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
+            kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
+    
+    def _replace_kv_caches_zero(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return 
+        
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+        
+        logger.info("zero")
+        
+        for kv_cache in self.kv_caches:
+
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = 0
+            kv_cache[1, destination_block_id, offsets_gpu] = 0
+
+    def _replace_kv_caches_nearby(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return 
+        
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+        
+        logger.info("nearby")
+        
+        for kv_cache in self.kv_caches:
+            # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
+            # 1. Extract the Sink K and V from slot 0 of the sink block
+            # Resulting shape: [num_kv_heads, head_size]
+            sink_k = kv_cache[0, destination_block_id, index]
+            sink_v = kv_cache[1, destination_block_id, index]
+
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
+            kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
+
+    def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata]) -> None:
+        # Iterate through the layers you want to track 
+        # Note: Layer is in order according to bind_kv_cache()
+            
+        try:
+            idx_to_name = sorted(attn_metadata_dict.keys())
+        except (IndexError, ValueError):
+            idx_to_name = list(attn_metadata_dict.keys())
+        
+        
+        for layer_idx, kv_cache in enumerate(self.kv_caches):
+            if self.l2_norm_cache.should_compute_for_layer(layer_idx):
+                # kv_cache shape: [2, num_blocks, block_size, num_heads, head_size]
+                key_cache = kv_cache[0]
+                attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
+                # Update all requests 
+                self.l2_norm_cache.update_norms_batch(
+                    request_ids=list(self.requests.keys()),
+                    key_cache=key_cache,
+                    block_table=attn_metadata.block_table,
+                    seq_lens=attn_metadata.seq_lens,
+                    block_size=self.cache_config.block_size,
+                    layer_idx=layer_idx
+                )
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor
@@ -1708,6 +1896,12 @@ class GPUModelRunner(
                         :num_reqs_padded
                     ],
                 )
+
+            # Get request IDs for L2 norm tracking
+            # Check if the builder supports request_ids and compute_l2_norms args
+            if get_l2_norm_cache().is_enabled:
+                extra_attn_metadata_args['request_ids'] = list(self.input_batch.req_ids[:num_reqs])
+                extra_attn_metadata_args['compute_l2_norms'] = True
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(
@@ -3290,7 +3484,16 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-
+        
+        # Calculate time for l2 norm computation 
+        torch.cuda.synchronize()
+        l2_norm_start_time = time.perf_counter()
+        # Add to L2 Norm after one forward pass
+        self._compute_l2_norms(attn_metadata_dict=attn_metadata)
+        torch.cuda.synchronize()
+        
+        self.l2_norm_overhead_time = time.perf_counter() - l2_norm_start_time
+        
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
@@ -3511,6 +3714,8 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                kv_eviction_overhead_time=self.kv_eviction_overhead_time,
+                l2_norm_overhead_time=self.l2_norm_overhead_time,
             )
 
         if not self.use_async_scheduling:
