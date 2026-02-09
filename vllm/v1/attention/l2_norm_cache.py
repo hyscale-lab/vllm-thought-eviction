@@ -41,7 +41,7 @@ class RequestL2NormData:
         
         new_len = new_norms.shape[0]
         total_len = new_len +  num_evicted_tokens
-        num_to_copy = total_len - self.current_seq_len
+        num_to_copy = total_len - self.current_seq_len 
 
         with self._lock:
             # Copy L2 norms as append 
@@ -49,7 +49,7 @@ class RequestL2NormData:
                 new_norms[new_len-num_to_copy:new_len]
             )
             self.current_seq_len += num_to_copy
-
+            
     def get_norms(self, start_index: int = 0) -> List[float]:
         with self._lock:
             if start_index >= self.current_seq_len:
@@ -203,20 +203,58 @@ class L2NormCache:
         seq_lens: torch.Tensor,
         block_size: int,
         num_evicted_tokens_list: dict[str, int],
-    ):
+    ) -> Optional[Dict[str, float]]:
+        """
+        Batch update L2 norms for multiple requests.
+        
+        Returns:
+            Optional dict with timing breakdown (only if VLLM_ENABLE_GRANULAR_METRICS is set):
+            - sync_time: Time for CUDA synchronization / .item() calls
+            - gather_time: Time for index_select operations
+            - compute_time: Time for torch.norm computation
+            - flatten_time: Time for flatten/slice operations
+            - cpu_transfer_time: Time for GPU->CPU transfer (.cpu() call)
+            - update_time: Time to update request buffers (CPU dict operations)
+        """
+        import time
+        import vllm.envs as envs
+        
+        num_evicted_tokens_list: dict[str, int]
         if not self._enabled or key_cache is None:
-            return
+            return None
+
+        enable_granular = envs.VLLM_ENABLE_GRANULAR_METRICS
+        timing = {
+            'sync_time': 0.0,
+            'gather_time': 0.0,
+            'compute_time': 0.0,
+            'flatten_time': 0.0,
+            'cpu_transfer_time': 0.0,
+            'update_time': 0.0,
+        } if enable_granular else None
 
         try:
-            # Filter for active requests
+            # Filter for active requests (note: .item() triggers sync per element)
+            if enable_granular:
+                t0 = time.perf_counter()
+                
             active_indices = [i for i, rid in enumerate(request_ids) 
                               if rid is not None and seq_lens[i].item() > 0]
-            if not active_indices:
-                return
             
+            if enable_granular:
+                timing['sync_time'] += time.perf_counter() - t0
+            if not active_indices:
+                return timing if enable_granular else None
+
             for idx in active_indices:
                 req_id = request_ids[idx]
+                
+                # .item() triggers CUDA sync
+                if enable_granular:
+                    t0 = time.perf_counter()
                 seq_len = int(seq_lens[idx].item())
+                if enable_granular:
+                    timing['sync_time'] += time.perf_counter() - t0
                 num_evicted_tokens = num_evicted_tokens_list.get(req_id, 0)
                 actual_len = seq_len - num_evicted_tokens
                 
@@ -233,22 +271,49 @@ class L2NormCache:
                     valid_blocks = block_indices[valid_mask]
                     
                     # 1. Gather blocks [num_blocks, block_size, heads, head_size]
+                    if enable_granular:
+                        torch.cuda.synchronize()
+                        t0 = time.perf_counter()
+                        
                     gathered = layer_tensor.index_select(0, valid_blocks)
+                    if enable_granular:
+                        torch.cuda.synchronize()
+                        timing['gather_time'] += time.perf_counter() - t0
                 
-                    # 2. Compute Norm per block FIRST to reduce size immediately
+                    # 2. Compute Norm per block FIRST to reduce size immediately and add the results to a buffer 
                     # [num_blocks, block_size]
-                    layer_norms = torch.norm(gathered.float(), p=2, dim=-1).mean(dim=-1)
-                    
+                    if enable_granular:
+                        torch.cuda.synchronize()
+                        t0 = time.perf_counter()
+                        
+                    layer_norms = torch.norm(gathered.float(), p=2, dim=-1).mean(dim=-1)    
                     norm_buffer.add_(layer_norms.flatten()[:actual_len])
+                    
+                    if enable_granular:
+                        torch.cuda.synchronize()
+                        timing['compute_time'] += time.perf_counter() - t0 
                 
-                # 3. Flatten and slice to exact seq_len (Zero-copy view usually)
+                # Take the average across the layers 
+                if enable_granular:
+                    torch.cuda.synchronize()
+                    t0 = time.perf_counter()
                 final_norms = norm_buffer / num_layers
-                
+                if enable_granular:
+                    torch.cuda.synchronize()
+                    timing['flatten_time'] += time.perf_counter() - t0
+                    
                 # 4. Update Cache
+                if enable_granular:
+                    t0 = time.perf_counter()
                 self.get_or_create_request(req_id).update(final_norms, num_evicted_tokens)
+                if enable_granular:
+                    timing['update_time'] += time.perf_counter() - t0
+            
+            return timing
                 
         except Exception as e:
-            logger.info(f"Error computing L2 norms batch: {e}")
+            logger.warning(f"Error computing L2 norms batch: {e}")
+            return None
     
     def get_norms(self, request_id: str, start_index: int = 0) -> Optional[List[float]]:
         """

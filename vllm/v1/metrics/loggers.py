@@ -908,6 +908,88 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_kv_eviction_overhead_time = make_per_engine(
             gauge_kv_eviction_overhead_time, engine_indexes, model_name
         )
+        
+        
+        # Granular overhead metrics (only populated when VLLM_ENABLE_GRANULAR_METRICS=1)
+        gauge_l2_norm_sync_time = self._gauge_cls(
+            name="vllm:l2_norm_sync_time",
+            documentation="Time spent in CUDA synchronization / .item() calls for L2 norm computation.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_l2_norm_sync_time = make_per_engine(
+            gauge_l2_norm_sync_time, engine_indexes, model_name
+        )
+        
+        gauge_l2_norm_gather_time = self._gauge_cls(
+            name="vllm:l2_norm_gather_time",
+            documentation="Time spent gathering KV cache blocks for L2 norm computation.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_l2_norm_gather_time = make_per_engine(
+            gauge_l2_norm_gather_time, engine_indexes, model_name
+        )
+        
+        gauge_l2_norm_compute_time = self._gauge_cls(
+            name="vllm:l2_norm_compute_time",
+            documentation="Time spent computing torch.norm for L2 norms.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_l2_norm_compute_time = make_per_engine(
+            gauge_l2_norm_compute_time, engine_indexes, model_name
+        )
+        
+        gauge_l2_norm_flatten_time = self._gauge_cls(
+            name="vllm:l2_norm_flatten_time",
+            documentation="Time spent flattening and slicing L2 norm results.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_l2_norm_flatten_time = make_per_engine(
+            gauge_l2_norm_flatten_time, engine_indexes, model_name
+        )
+        
+        gauge_l2_norm_cpu_transfer_time = self._gauge_cls(
+            name="vllm:l2_norm_cpu_transfer_time",
+            documentation="Time spent transferring L2 norm results from GPU to CPU.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_l2_norm_cpu_transfer_time = make_per_engine(
+            gauge_l2_norm_cpu_transfer_time, engine_indexes, model_name
+        )
+        
+        gauge_l2_norm_update_time = self._gauge_cls(
+            name="vllm:l2_norm_update_time",
+            documentation="Time spent updating per-request L2 norm buffers.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_l2_norm_update_time = make_per_engine(
+            gauge_l2_norm_update_time, engine_indexes, model_name
+        )
+        
+        gauge_kv_eviction_blocktable_time = self._gauge_cls(
+            name="vllm:kv_eviction_blocktable_time",
+            documentation="Time spent manipulating block tables during eviction.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_eviction_blocktable_time = make_per_engine(
+            gauge_kv_eviction_blocktable_time, engine_indexes, model_name
+        )
+        
+        gauge_kv_eviction_replace_kv_time = self._gauge_cls(
+            name="vllm:kv_eviction_replace_kv_time",
+            documentation="Time spent in replace_kv operations during eviction.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_kv_eviction_replace_kv_time = make_per_engine(
+            gauge_kv_eviction_replace_kv_time, engine_indexes, model_name
+        )
 
         #
         # KV Cache residency metrics
@@ -1052,7 +1134,18 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
             
             self.gauge_kv_eviction_overhead_time[engine_idx].set(scheduler_stats.kv_eviction_overhead_time)
-
+            
+            # Record granular overhead metrics if available
+            om = scheduler_stats.overhead_metrics
+            if om:
+                self.gauge_l2_norm_sync_time[engine_idx].set(om.get('l2_norm_sync_time', 0.0))
+                self.gauge_l2_norm_gather_time[engine_idx].set(om.get('l2_norm_gather_time', 0.0))
+                self.gauge_l2_norm_compute_time[engine_idx].set(om.get('l2_norm_compute_time', 0.0))
+                self.gauge_l2_norm_flatten_time[engine_idx].set(om.get('l2_norm_flatten_time', 0.0))
+                self.gauge_l2_norm_cpu_transfer_time[engine_idx].set(om.get('l2_norm_cpu_transfer_time', 0.0))
+                self.gauge_l2_norm_update_time[engine_idx].set(om.get('l2_norm_update_time', 0.0))
+                self.gauge_kv_eviction_blocktable_time[engine_idx].set(om.get('kv_eviction_blocktable_time', 0.0))
+                self.gauge_kv_eviction_replace_kv_time[engine_idx].set(om.get('kv_eviction_replace_kv_time', 0.0))
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
             )

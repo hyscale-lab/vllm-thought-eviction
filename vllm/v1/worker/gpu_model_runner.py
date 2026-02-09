@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from functools import reduce
 from itertools import product
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast, Optional
 
 import numpy as np
 import torch
@@ -136,6 +136,7 @@ from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
+    OverheadMetrics,
     PoolerOutput,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
@@ -704,6 +705,8 @@ class GPUModelRunner(
         self.num_evicted_tokens_list: dict[str, int] = {}
         
         self.past_evicted_mask: dict[str, np.ndarray] = {}
+        self.l2_norm_overhead_time: float = 0.0
+        self.overhead_metrics: OverheadMetrics = OverheadMetrics()
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -1101,8 +1104,16 @@ class GPUModelRunner(
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
-
-        start_time = time.monotonic()
+        
+        if self.l2_norm_cache.is_enabled:
+            torch.cuda.synchronize()
+            start_time = time.perf_counter()
+            
+        enable_granular = envs.VLLM_ENABLE_GRANULAR_METRICS
+        eviction_blocktable_time = 0.0
+        eviction_replace_kv_time = 0.0
+        eviction_block_count = 0
+        
         # Process evictions: Invalidate evicted blocks in the block table.
         # This ensures that the model does not attend to the freed blocks.
         evicted_ranges = scheduler_output.evictable_token_ranges_map
@@ -1135,55 +1146,58 @@ class GPUModelRunner(
 
                             self.evicted_ranges[req_id] = ranges
                             
-                            # Update cache request state 
-                            if group_id < len(req_state.block_ids):
-                                block_ids_list = req_state.block_ids[group_id]
-                                start_block = (num_survivors + block_size - 1) // block_size
-                                end_block = current_total_len // block_size
-                                for block_idx in range(start_block, end_block):
-                                        if block_idx < len(block_ids_list):
-                                            block_ids_list[block_idx] = 0
-                                if start_block < end_block:
-                                    bt_np[req_index, start_block:end_block]
-                                
-        self.kv_eviction_overhead_time = time.monotonic() - start_time
+        if self.l2_norm_cache.is_enabled:
+            torch.cuda.synchronize()
+            self.kv_eviction_overhead_time = time.perf_counter() - start_time
+        else:
+            self.kv_eviction_overhead_time = 0.0
+            
+        self.overhead_metrics.kv_eviction_blocktable_time = eviction_blocktable_time
+        self.overhead_metrics.kv_eviction_replace_kv_time = eviction_replace_kv_time
+        self.overhead_metrics.kv_eviction_block_count = eviction_block_count
+        self.overhead_metrics.kv_eviction_total_time = self.kv_eviction_overhead_time
+        if evicted_ranges:
+            self.overhead_metrics.eviction_events = 1 
     
-    def _compact_kv_caches(self, req_index: int, past_mask: np.ndarray, bt_np: np.ndarray, block_size: int, evicted_ranges: list[tuple[int, int]]) -> None:
+    def _compact_kv_caches(self, req_index: int, past_mask: np.ndarray, bt_np: np.ndarray, block_size: int, evicted_ranges: list[tuple[int, int]]) -> int:
         """
         Compaction of KV Cache
         """
         current_survivors = np.where(past_mask)[0]
         
         for start, end in evicted_ranges:
-            past_mask[max(0, start):min(end, len(past_mask))] = False
+            past_mask[max(0, start):min(end+1, len(past_mask))] = False
         
         new_survivors = np.where(past_mask)[0]
         
-        current_phys_blocks = bt_np[req_index][bt_np[req_index] != 0]
+        current_phys_blocks = bt_np[req_index]
+        # logger.info(f"Current Phys Block: {current_phys_blocks.tolist()}")
+        # logger.info(f"current_survivors: {current_survivors.tolist()}")
+        # logger.info(f"new_survivors: {new_survivors.tolist()}")
         
         # This finds the position of each 'new_survivor' token in the list of tokens 
         # that were present at the start of this function call.
         # searchsorted is O(log N) and very fast for this.
         rel_indices = np.searchsorted(current_survivors, new_survivors)
         num_new_survivors = len(rel_indices)  
+        dst_indices = np.arange(len(rel_indices))
         
-        src_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in rel_indices], 
-                                device=self.device, dtype=torch.long)
-        src_offsets = torch.tensor([i % block_size for i in rel_indices], 
-                                device=self.device, dtype=torch.long)
+        mask = rel_indices != dst_indices
+        move_src = rel_indices[mask]
+        move_dst = dst_indices[mask]
         
-        # 5. FIND DESTINATION: Pack them into the earliest blocks
-        dst_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in range(len(rel_indices))], 
+        src_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in move_src], 
                                 device=self.device, dtype=torch.long)
-        dst_offsets = torch.tensor([i % block_size for i in range(len(rel_indices))], 
+        src_offsets = torch.tensor([i % block_size for i in move_src], 
                                 device=self.device, dtype=torch.long)
 
-        # Execute Copy
+        dst_blocks = torch.tensor([current_phys_blocks[i // block_size] for i in move_dst], 
+                                device=self.device, dtype=torch.long)
+        dst_offsets = torch.tensor([i % block_size for i in move_dst], 
+                                device=self.device, dtype=torch.long)
+
         for kv_cache in self.kv_caches:
-            # Advanced indexing: [Layer, Physical_Block, Slot_Offset, Heads, Dims]
-            # Copying all heads and hidden dims at once [:]
-            kv_cache[0, dst_blocks, dst_offsets] = kv_cache[0, src_blocks, src_offsets]
-            kv_cache[1, dst_blocks, dst_offsets] = kv_cache[1, src_blocks, src_offsets]
+            kv_cache[:, dst_blocks, dst_offsets] = kv_cache[:, src_blocks, src_offsets]
             
         return num_new_survivors
         
@@ -1250,10 +1264,9 @@ class GPUModelRunner(
             kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
             kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
 
-    def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata]) -> None:
-        # Iterate through the layers you want to track 
-        # Note: Layer is in order according to bind_kv_cache()
-            
+    def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata], metrics: Optional[OverheadMetrics] = None) -> OverheadMetrics:
+        """Compute L2 norms for all layers and return granular timing breakdown."""
+        
         try:
             idx_to_name = sorted(attn_metadata_dict.keys())
         except (IndexError, ValueError):
@@ -1271,7 +1284,7 @@ class GPUModelRunner(
                 block_table_list.append(attn_metadata.block_table)
                 seq_lens=attn_metadata.seq_lens
         
-        self.l2_norm_cache.update_norms_batch(
+        timing = self.l2_norm_cache.update_norms_batch(
             request_ids=list(self.requests.keys()),
             key_cache=layers_to_compute,
             block_table=block_table_list,
@@ -1280,6 +1293,27 @@ class GPUModelRunner(
             num_evicted_tokens_list=self.num_evicted_tokens_list
         )
         
+
+        if timing:
+            metrics.l2_norm_sync_time += timing['sync_time']
+            metrics.l2_norm_gather_time += timing['gather_time']
+            metrics.l2_norm_compute_time += timing['compute_time']
+            metrics.l2_norm_flatten_time += timing['flatten_time']
+            metrics.l2_norm_cpu_transfer_time += timing['cpu_transfer_time']
+            metrics.l2_norm_update_time += timing['update_time']
+            metrics.l2_norm_layer_count += 1
+        
+        # Compute total
+        metrics.l2_norm_total_time = (
+            metrics.l2_norm_sync_time +
+            metrics.l2_norm_gather_time + 
+            metrics.l2_norm_compute_time + 
+            metrics.l2_norm_flatten_time +
+            metrics.l2_norm_cpu_transfer_time +
+            metrics.l2_norm_update_time
+        )
+        
+        return metrics
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor
@@ -3514,8 +3548,17 @@ class GPUModelRunner(
                 **model_kwargs,
             )
         
-        # Add to L2 Norm after one forward pass
-        self._compute_l2_norms(attn_metadata_dict=attn_metadata)
+        if self.l2_norm_cache.is_enabled:
+            # Calculate time for l2 norm computation with granular breakdown
+            torch.cuda.synchronize()
+            l2_norm_start_time = time.perf_counter()
+            # Add to L2 Norm after one forward pass
+            self._compute_l2_norms(attn_metadata_dict=attn_metadata, metrics=self.overhead_metrics)
+            torch.cuda.synchronize()
+            self.l2_norm_overhead_time = time.perf_counter() - l2_norm_start_time
+        else:
+            self.l2_norm_overhead_time = 0.0
+        self.overhead_metrics.forward_steps = 1  # Incremented per step
         
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -3737,6 +3780,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                overhead_metrics=self.overhead_metrics,
                 kv_eviction_overhead_time=self.kv_eviction_overhead_time,
                 num_evicted_tokens_list=[self.num_evicted_tokens_list.get(k, 0) for k in self.input_batch.req_ids],
             )
