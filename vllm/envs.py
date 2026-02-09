@@ -256,6 +256,7 @@ if TYPE_CHECKING:
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_KV_REPLACEMENT_STRATEGY: str | None = None
+    VLLM_ENABLE_GRANULAR_METRICS: bool = False
 
 
 def get_default_cache_root():
@@ -1643,6 +1644,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
     "VLLM_KV_REPLACEMENT_STRATEGY": lambda: os.getenv("VLLM_KV_REPLACEMENT_STRATEGY", None),
+    # Enable granular overhead metrics for L2 norm and KV eviction timing breakdown.
+    # Default is False (off) for production. Set to 1 or true to enable.
+    "VLLM_ENABLE_GRANULAR_METRICS": lambda: os.environ.get(
+        "VLLM_ENABLE_GRANULAR_METRICS", "0"
+    ).lower() in ("1", "true"),
 }
 
 # --8<-- [end:env-vars-definition]

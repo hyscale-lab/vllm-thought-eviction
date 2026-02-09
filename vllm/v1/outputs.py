@@ -146,6 +146,50 @@ class ECConnectorOutput:
     finished_recving: set[str] | None = None
 
 
+@dataclass
+class OverheadMetrics:
+    """Granular overhead metrics for L2 norm computation and KV eviction."""
+    
+    # L2 norm computation breakdown
+    l2_norm_sync_time: float = 0.0  # Time for CUDA sync / .item() calls
+    l2_norm_gather_time: float = 0.0  # Time for index_select on KV cache blocks
+    l2_norm_compute_time: float = 0.0  # Time for torch.norm computation
+    l2_norm_flatten_time: float = 0.0  # Time for flatten and slice operations
+    l2_norm_cpu_transfer_time: float = 0.0  # Time for GPU->CPU transfer
+    l2_norm_update_time: float = 0.0  # Time to update per-request norm buffers
+    l2_norm_layer_count: int = 0  # Number of layers computed
+    l2_norm_total_time: float = 0.0  # Sum of above
+    
+    # KV eviction breakdown
+    kv_eviction_blocktable_time: float = 0.0  # Time to zero block table entries
+    kv_eviction_replace_kv_time: float = 0.0  # Time for attention sink/zero/nearby fill
+    kv_eviction_block_count: int = 0  # Number of blocks evicted
+    kv_eviction_total_time: float = 0.0  # Sum of above
+    
+    # Step counters
+    forward_steps: int = 0  # Number of forward steps
+    eviction_events: int = 0  # Number of eviction operations
+    
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            'l2_norm_sync_time': self.l2_norm_sync_time,
+            'l2_norm_gather_time': self.l2_norm_gather_time,
+            'l2_norm_compute_time': self.l2_norm_compute_time,
+            'l2_norm_flatten_time': self.l2_norm_flatten_time,
+            'l2_norm_cpu_transfer_time': self.l2_norm_cpu_transfer_time,
+            'l2_norm_update_time': self.l2_norm_update_time,
+            'l2_norm_layer_count': self.l2_norm_layer_count,
+            'l2_norm_total_time': self.l2_norm_total_time,
+            'kv_eviction_blocktable_time': self.kv_eviction_blocktable_time,
+            'kv_eviction_replace_kv_time': self.kv_eviction_replace_kv_time,
+            'kv_eviction_block_count': self.kv_eviction_block_count,
+            'kv_eviction_total_time': self.kv_eviction_total_time,
+            'forward_steps': self.forward_steps,
+            'eviction_events': self.eviction_events,
+        }
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -187,6 +231,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
     
+    # Granular overhead metrics
+    overhead_metrics: OverheadMetrics = field(default_factory=OverheadMetrics)
+    
+    # Legacy fields for backward compatibility
     kv_eviction_overhead_time: float = 0.0
     l2_norm_overhead_time: float = 0.0
 

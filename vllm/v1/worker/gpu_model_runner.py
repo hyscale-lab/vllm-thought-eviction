@@ -136,6 +136,7 @@ from vllm.v1.outputs import (
     LogprobsLists,
     LogprobsTensors,
     ModelRunnerOutput,
+    OverheadMetrics,
     PoolerOutput,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
@@ -697,6 +698,7 @@ class GPUModelRunner(
         
         self.kv_eviction_overhead_time: float = 0.0
         self.l2_norm_overhead_time: float = 0.0
+        self.overhead_metrics: OverheadMetrics = OverheadMetrics()
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -1085,6 +1087,11 @@ class GPUModelRunner(
 
         torch.cuda.synchronize()
         start_time = time.perf_counter()
+        enable_granular = envs.VLLM_ENABLE_GRANULAR_METRICS
+        eviction_blocktable_time = 0.0
+        eviction_replace_kv_time = 0.0
+        eviction_block_count = 0
+        
         # Process evictions: Invalidate evicted blocks in the block table.
         # This ensures that the model does not attend to the freed blocks.
         evicted_ranges = scheduler_output.evictable_token_ranges_map
@@ -1125,6 +1132,8 @@ class GPUModelRunner(
                             # Acts as an attention sink
                             # Check if eviction operation is done previously
                             if self.replace_func:
+                                if enable_granular:
+                                    t0 = time.perf_counter()
                                 if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []):
                                     sink_block_id = bt_np[req_index, 0]
                                     if start % block_size != 0:
@@ -1152,12 +1161,28 @@ class GPUModelRunner(
                                                     )
                                     
                                     self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
+                                if enable_granular:
+                                    eviction_replace_kv_time += time.perf_counter() - t0
                                 
+                            # Time block table manipulation
+                            if enable_granular:
+                                t0 = time.perf_counter()
                             if start_block < end_block:
                                 bt_np[req_index, start_block:end_block] = 0
+                                eviction_block_count += end_block - start_block
+                            if enable_granular:
+                                eviction_blocktable_time += time.perf_counter() - t0
         
         torch.cuda.synchronize()
-        self.kv_eviction_overhead_time = time.perf_counter() - start_time       
+        self.kv_eviction_overhead_time = time.perf_counter() - start_time
+        
+        # Update overhead_metrics with eviction breakdown
+        self.overhead_metrics.kv_eviction_blocktable_time = eviction_blocktable_time
+        self.overhead_metrics.kv_eviction_replace_kv_time = eviction_replace_kv_time
+        self.overhead_metrics.kv_eviction_block_count = eviction_block_count
+        self.overhead_metrics.kv_eviction_total_time = self.kv_eviction_overhead_time
+        if evicted_ranges:
+            self.overhead_metrics.eviction_events = 1       
  
     
     def _replace_kv_caches_sink(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
@@ -1227,23 +1252,22 @@ class GPUModelRunner(
             kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
             kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
 
-    def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata]) -> None:
-        # Iterate through the layers you want to track 
-        # Note: Layer is in order according to bind_kv_cache()
-            
+    def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata]) -> OverheadMetrics:
+        """Compute L2 norms for all layers and return granular timing breakdown."""
+        metrics = OverheadMetrics()
+        
         try:
             idx_to_name = sorted(attn_metadata_dict.keys())
         except (IndexError, ValueError):
             idx_to_name = list(attn_metadata_dict.keys())
-        
         
         for layer_idx, kv_cache in enumerate(self.kv_caches):
             if self.l2_norm_cache.should_compute_for_layer(layer_idx):
                 # kv_cache shape: [2, num_blocks, block_size, num_heads, head_size]
                 key_cache = kv_cache[0]
                 attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
-                # Update all requests 
-                self.l2_norm_cache.update_norms_batch(
+                # Update all requests and collect timing
+                timing = self.l2_norm_cache.update_norms_batch(
                     request_ids=list(self.requests.keys()),
                     key_cache=key_cache,
                     block_table=attn_metadata.block_table,
@@ -1251,6 +1275,26 @@ class GPUModelRunner(
                     block_size=self.cache_config.block_size,
                     layer_idx=layer_idx
                 )
+                if timing:
+                    metrics.l2_norm_sync_time += timing['sync_time']
+                    metrics.l2_norm_gather_time += timing['gather_time']
+                    metrics.l2_norm_compute_time += timing['compute_time']
+                    metrics.l2_norm_flatten_time += timing['flatten_time']
+                    metrics.l2_norm_cpu_transfer_time += timing['cpu_transfer_time']
+                    metrics.l2_norm_update_time += timing['update_time']
+                    metrics.l2_norm_layer_count += 1
+        
+        # Compute total
+        metrics.l2_norm_total_time = (
+            metrics.l2_norm_sync_time +
+            metrics.l2_norm_gather_time + 
+            metrics.l2_norm_compute_time + 
+            metrics.l2_norm_flatten_time +
+            metrics.l2_norm_cpu_transfer_time +
+            metrics.l2_norm_update_time
+        )
+        
+        return metrics
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor
@@ -3485,14 +3529,16 @@ class GPUModelRunner(
                 **model_kwargs,
             )
         
-        # Calculate time for l2 norm computation 
+        # Calculate time for l2 norm computation with granular breakdown
         torch.cuda.synchronize()
         l2_norm_start_time = time.perf_counter()
         # Add to L2 Norm after one forward pass
-        self._compute_l2_norms(attn_metadata_dict=attn_metadata)
+        self.overhead_metrics = self._compute_l2_norms(attn_metadata_dict=attn_metadata)
         torch.cuda.synchronize()
         
+        # Set legacy field for backward compatibility  
         self.l2_norm_overhead_time = time.perf_counter() - l2_norm_start_time
+        self.overhead_metrics.forward_steps = 1  # Incremented per step
         
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -3714,6 +3760,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                overhead_metrics=self.overhead_metrics,
                 kv_eviction_overhead_time=self.kv_eviction_overhead_time,
                 l2_norm_overhead_time=self.l2_norm_overhead_time,
             )

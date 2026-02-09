@@ -72,6 +72,43 @@ class RequestL2NormData:
 
             self.num_layers_accumulated += 1
 
+    def update_from_cpu(self, cpu_norms: torch.Tensor):
+        """
+        Update norms from an already-CPU tensor (skips .cpu() transfer).
+        Used when cpu_transfer_time is measured separately.
+        """
+        new_len = cpu_norms.shape[0]
+
+        with self._lock:
+            # Safety truncate
+            if new_len > MAX_SEQ_LEN:
+                cpu_norms = cpu_norms[:MAX_SEQ_LEN]
+                new_len = MAX_SEQ_LEN
+
+            # Initialization
+            if self.num_layers_accumulated == 0:
+                self.buffer[:new_len].copy_(cpu_norms)
+                self.current_seq_len = new_len
+                self.num_layers_accumulated = 1
+                return
+
+            # Update overlapping part (Running Average)
+            overlap_len = min(self.current_seq_len, new_len)
+            n = self.num_layers_accumulated
+            
+            if overlap_len > 0:
+                # In-place update: (old * n + new) / (n + 1)
+                self.buffer[:overlap_len].mul_(n).add_(cpu_norms[:overlap_len]).div_(n + 1)
+
+            # Handle new tokens (Append)
+            if new_len > self.current_seq_len:
+                self.buffer[self.current_seq_len : new_len].copy_(
+                    cpu_norms[self.current_seq_len:]
+                )
+                self.current_seq_len = new_len
+
+            self.num_layers_accumulated += 1
+
     def get_norms(self, start_index: int = 0) -> List[float]:
         with self._lock:
             if start_index >= self.current_seq_len:
@@ -225,23 +262,58 @@ class L2NormCache:
         seq_lens: torch.Tensor,
         block_size: int,
         layer_idx: Optional[int] = None,
-    ):
+    ) -> Optional[Dict[str, float]]:
+        """
+        Batch update L2 norms for multiple requests.
+        
+        Returns:
+            Optional dict with timing breakdown (only if VLLM_ENABLE_GRANULAR_METRICS is set):
+            - sync_time: Time for CUDA synchronization / .item() calls
+            - gather_time: Time for index_select operations
+            - compute_time: Time for torch.norm computation
+            - flatten_time: Time for flatten/slice operations
+            - cpu_transfer_time: Time for GPU->CPU transfer (.cpu() call)
+            - update_time: Time to update request buffers (CPU dict operations)
+        """
+        import time
+        import vllm.envs as envs
+        
         if not self._enabled or key_cache is None:
-            return
+            return None
             
         if layer_idx is not None and not self.should_compute_for_layer(layer_idx):
-            return
+            return None
+
+        enable_granular = envs.VLLM_ENABLE_GRANULAR_METRICS
+        timing = {
+            'sync_time': 0.0,
+            'gather_time': 0.0,
+            'compute_time': 0.0,
+            'flatten_time': 0.0,
+            'cpu_transfer_time': 0.0,
+            'update_time': 0.0,
+        } if enable_granular else None
 
         try:
-            # Filter for active requests
+            # Filter for active requests (note: .item() triggers sync per element)
+            if enable_granular:
+                t0 = time.perf_counter()
             active_indices = [i for i, rid in enumerate(request_ids) 
                               if rid is not None and seq_lens[i].item() > 0]
+            if enable_granular:
+                timing['sync_time'] += time.perf_counter() - t0
             if not active_indices:
-                return
+                return timing if enable_granular else None
 
             for idx in active_indices:
                 req_id = request_ids[idx]
+                
+                # .item() triggers CUDA sync
+                if enable_granular:
+                    t0 = time.perf_counter()
                 seq_len = int(seq_lens[idx].item())
+                if enable_granular:
+                    timing['sync_time'] += time.perf_counter() - t0
                 
                 # Get valid blocks
                 num_blocks = (seq_len + block_size - 1) // block_size
@@ -252,20 +324,55 @@ class L2NormCache:
                 valid_blocks = block_indices[valid_mask]
 
                 # 1. Gather blocks [num_blocks, block_size, heads, head_size]
+                if enable_granular:
+                    torch.cuda.synchronize()
+                    t0 = time.perf_counter()
                 gathered_blocks = key_cache.index_select(0, valid_blocks)
+                if enable_granular:
+                    torch.cuda.synchronize()
+                    timing['gather_time'] += time.perf_counter() - t0
                 
                 # 2. Compute Norm per block FIRST to reduce size immediately
                 # [num_blocks, block_size]
+                if enable_granular:
+                    torch.cuda.synchronize()
+                    t0 = time.perf_counter()
                 block_norms = torch.norm(gathered_blocks.float(), p=2, dim=-1).mean(dim=-1)
+                if enable_granular:
+                    torch.cuda.synchronize()
+                    timing['compute_time'] += time.perf_counter() - t0
                 
                 # 3. Flatten and slice to exact seq_len (Zero-copy view usually)
+                if enable_granular:
+                    torch.cuda.synchronize()
+                    t0 = time.perf_counter()
                 final_norms = block_norms.flatten()[:seq_len]
+                if enable_granular:
+                    torch.cuda.synchronize()
+                    timing['flatten_time'] += time.perf_counter() - t0
                 
-                # 4. Update Cache
-                self.get_or_create_request(req_id).update(final_norms)
+                # 4. GPU->CPU transfer (includes implicit sync)
+                if enable_granular:
+                    t0 = time.perf_counter()
+                # Handle input shape and device before transfer
+                if final_norms.dim() > 1:
+                    final_norms = final_norms.mean(dim=-1)
+                cpu_norms = final_norms.detach().cpu()
+                if enable_granular:
+                    timing['cpu_transfer_time'] += time.perf_counter() - t0
+                
+                # 5. Update Cache (CPU dict operations)
+                if enable_granular:
+                    t0 = time.perf_counter()
+                self.get_or_create_request(req_id).update_from_cpu(cpu_norms)
+                if enable_granular:
+                    timing['update_time'] += time.perf_counter() - t0
+                
+            return timing
                 
         except Exception as e:
             logger.warning(f"Error computing L2 norms batch: {e}")
+            return None
     
     def get_norms(self, request_id: str, start_index: int = 0) -> Optional[List[float]]:
         """

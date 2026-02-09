@@ -254,6 +254,9 @@ class Scheduler(SchedulerInterface):
         
         self.kv_eviction_overhead_time: float = 0.0 
         self.l2_norm_overhead_time: float = 0.0
+        
+        # Granular overhead metrics accumulator
+        self.accumulated_overhead_metrics: dict = {}
             
     def update_request_mask(self, request_id: str,
                             evictable_token_ranges: list[tuple[int, int]]):
@@ -1169,6 +1172,19 @@ class Scheduler(SchedulerInterface):
         
         self.kv_eviction_overhead_time += kv_eviction_overhead_time
         self.l2_norm_overhead_time += l2_norm_overhead_time
+        
+        # Accumulate granular overhead metrics
+        if model_runner_output.overhead_metrics is not None:
+            om = model_runner_output.overhead_metrics
+            for key in ['l2_norm_sync_time', 'l2_norm_gather_time', 'l2_norm_compute_time',
+                        'l2_norm_flatten_time', 'l2_norm_cpu_transfer_time', 'l2_norm_update_time',
+                        'l2_norm_total_time', 'l2_norm_layer_count', 'forward_steps',
+                        'kv_eviction_blocktable_time', 'kv_eviction_replace_kv_time',
+                        'kv_eviction_total_time', 'kv_eviction_block_count', 'eviction_events']:
+                if hasattr(om, key):
+                    self.accumulated_overhead_metrics[key] = (
+                        self.accumulated_overhead_metrics.get(key, 0.0) + getattr(om, key)
+                    )
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1576,6 +1592,7 @@ class Scheduler(SchedulerInterface):
         
         self.kv_eviction_overhead_time = 0.0
         self.l2_norm_overhead_time = 0.0
+        self.accumulated_overhead_metrics.clear()
         
         if not delay_free_blocks:
             self._free_blocks(request)
@@ -1685,6 +1702,7 @@ class Scheduler(SchedulerInterface):
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
+            overhead_metrics=self.accumulated_overhead_metrics.copy() if self.accumulated_overhead_metrics else None,
             kv_eviction_overhead_time=self.kv_eviction_overhead_time,
             l2_norm_overhead_time=self.l2_norm_overhead_time,
         )
