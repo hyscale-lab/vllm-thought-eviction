@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from functools import reduce
 from itertools import product
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast, Optional
 
 import numpy as np
 import torch

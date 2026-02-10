@@ -1176,14 +1176,16 @@ class Scheduler(SchedulerInterface):
         # Accumulate granular overhead metrics
         if model_runner_output.overhead_metrics is not None:
             om = model_runner_output.overhead_metrics
+            is_dict = isinstance(om, dict)
             for key in ['l2_norm_sync_time', 'l2_norm_gather_time', 'l2_norm_compute_time',
                         'l2_norm_flatten_time', 'l2_norm_cpu_transfer_time', 'l2_norm_update_time',
                         'l2_norm_total_time', 'l2_norm_layer_count', 'forward_steps',
                         'kv_eviction_blocktable_time', 'kv_eviction_replace_kv_time',
                         'kv_eviction_total_time', 'kv_eviction_block_count', 'eviction_events']:
-                if hasattr(om, key):
+                val = om.get(key) if is_dict else getattr(om, key, None)
+                if val is not None:
                     self.accumulated_overhead_metrics[key] = (
-                        self.accumulated_overhead_metrics.get(key, 0.0) + getattr(om, key)
+                        self.accumulated_overhead_metrics.get(key, 0.0) + val
                     )
 
         perf_stats: PerfStats | None = None
