@@ -1132,19 +1132,17 @@ class GPUModelRunner(
                             # Acts as an attention sink
                             # Check if eviction operation is done previously
                             if self.replace_func:
-                                if enable_granular:
-                                    t0 = time.perf_counter()
                                 if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []):
                                     sink_block_id = bt_np[req_index, 0]
                                     if start % block_size != 0:
-                                        self.replace_func(sink_block_id, 
+                                        eviction_replace_kv_time += self.replace_func(sink_block_id, 
                                                                 start_block-1, 
                                                                 list(range(start%block_size, block_size)),
                                                                 (start%block_size)-1,
                                                                 )
                                     
                                     if end % block_size != 0:
-                                        self.replace_func(sink_block_id, 
+                                        eviction_replace_kv_time += self.replace_func(sink_block_id, 
                                                                 end_block, 
                                                                 list(range(0, end % block_size)),
                                                                 end % block_size,
@@ -1154,15 +1152,13 @@ class GPUModelRunner(
                                     
                                 elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []):
                                     sink_block_id = bt_np[req_index, 0]
-                                    self.replace_func(sink_block_id, 
+                                    eviction_replace_kv_time += self.replace_func(sink_block_id, 
                                                     start_block-1, 
                                                     list(range(start%block_size, end % block_size)),
                                                     max((start%block_size)-1, 0),
                                                     )
                                     
                                     self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
-                                if enable_granular:
-                                    eviction_replace_kv_time += time.perf_counter() - t0
                                 
                             # Time block table manipulation
                             if enable_granular:
@@ -1189,8 +1185,9 @@ class GPUModelRunner(
         """
         Replace fragmented evicted KV Cache with attention sink (First token)
         """
-        if not offset_indices:
-            return 
+        if envs.VLLM_ENABLE_GRANULAR_METRICS:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
         
         offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
         
@@ -1208,14 +1205,20 @@ class GPUModelRunner(
             # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
             kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
             kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
+        
+        if envs.VLLM_ENABLE_GRANULAR_METRICS:
+            torch.cuda.synchronize()
+            return time.perf_counter() - t0
+        return 0.0
     
     def _replace_kv_caches_zero(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
         """
         Replace fragmented evicted KV Cache with attention sink (First token)
         """
-        if not offset_indices:
-            return 
-        
+        if envs.VLLM_ENABLE_GRANULAR_METRICS:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            
         offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
         
         logger.info("zero")
@@ -1227,14 +1230,20 @@ class GPUModelRunner(
             # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
             kv_cache[0, destination_block_id, offsets_gpu] = 0
             kv_cache[1, destination_block_id, offsets_gpu] = 0
+            
+        if envs.VLLM_ENABLE_GRANULAR_METRICS:
+            torch.cuda.synchronize()
+            return time.perf_counter() - t0
+        return 0.0
 
     def _replace_kv_caches_nearby(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
         """
         Replace fragmented evicted KV Cache with attention sink (First token)
         """
-        if not offset_indices:
-            return 
-        
+        if envs.VLLM_ENABLE_GRANULAR_METRICS:
+            torch.cuda.synchronize()
+            t0 = time.perf_counter()
+            
         offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
         
         logger.info("nearby")
@@ -1251,10 +1260,17 @@ class GPUModelRunner(
             # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
             kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
             kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
+            
+        if envs.VLLM_ENABLE_GRANULAR_METRICS:
+            torch.cuda.synchronize()
+            return time.perf_counter() - t0
+        return 0.0
 
-    def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata]) -> OverheadMetrics:
+    def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata], 
+                          metrics: Optional[OverheadMetrics] = None) -> OverheadMetrics:
         """Compute L2 norms for all layers and return granular timing breakdown."""
-        metrics = OverheadMetrics()
+        if metrics is None:
+            metrics = OverheadMetrics()
         
         try:
             idx_to_name = sorted(attn_metadata_dict.keys())
@@ -3533,7 +3549,7 @@ class GPUModelRunner(
         torch.cuda.synchronize()
         l2_norm_start_time = time.perf_counter()
         # Add to L2 Norm after one forward pass
-        self.overhead_metrics = self._compute_l2_norms(attn_metadata_dict=attn_metadata)
+        self._compute_l2_norms(attn_metadata_dict=attn_metadata, metrics=self.overhead_metrics)
         torch.cuda.synchronize()
         
         # Set legacy field for backward compatibility  
