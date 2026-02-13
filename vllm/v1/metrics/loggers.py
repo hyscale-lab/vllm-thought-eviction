@@ -999,6 +999,37 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_kv_eviction_replace_kv_time = make_per_engine(
             gauge_kv_eviction_replace_kv_time, engine_indexes, model_name
         )
+        
+        # Diagnostic metrics for understanding overhead
+        gauge_forward_steps = self._gauge_cls(
+            name="vllm:forward_steps",
+            documentation="Number of forward steps accumulated for request.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_forward_steps = make_per_engine(
+            gauge_forward_steps, engine_indexes, model_name
+        )
+        
+        gauge_l2_norm_layer_count = self._gauge_cls(
+            name="vllm:l2_norm_layer_count",
+            documentation="Number of layers processed for L2 norm computation.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_l2_norm_layer_count = make_per_engine(
+            gauge_l2_norm_layer_count, engine_indexes, model_name
+        )
+        
+        gauge_eviction_events = self._gauge_cls(
+            name="vllm:eviction_events",
+            documentation="Number of eviction events for request.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_eviction_events = make_per_engine(
+            gauge_eviction_events, engine_indexes, model_name
+        )
 
         #
         # KV Cache residency metrics
@@ -1156,6 +1187,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.gauge_l2_norm_update_time[engine_idx].set(om.get('l2_norm_update_time', 0.0))
                 self.gauge_kv_eviction_blocktable_time[engine_idx].set(om.get('kv_eviction_blocktable_time', 0.0))
                 self.gauge_kv_eviction_replace_kv_time[engine_idx].set(om.get('kv_eviction_replace_kv_time', 0.0))
+                # Diagnostic metrics
+                self.gauge_forward_steps[engine_idx].set(om.get('forward_steps', 0))
+                self.gauge_l2_norm_layer_count[engine_idx].set(om.get('l2_norm_layer_count', 0))
+                self.gauge_eviction_events[engine_idx].set(om.get('eviction_events', 0))
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
             )

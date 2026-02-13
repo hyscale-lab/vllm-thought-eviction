@@ -72,14 +72,35 @@ class RequestL2NormData:
 
             self.num_layers_accumulated += 1
 
-    def update_from_cpu(self, cpu_norms: torch.Tensor):
+    def update_from_cpu(self, cpu_norms: torch.Tensor, enable_timing: bool = False):
         """
         Update norms from an already-CPU tensor (skips .cpu() transfer).
         Used when cpu_transfer_time is measured separately.
+        
+        Returns timing dict if enable_timing=True for diagnostic purposes.
         """
+        import time
+        
+        timing = {
+            'lock_wait_time': 0.0,
+            'buffer_copy_time': 0.0,
+            'buffer_update_time': 0.0,
+            'overlap_len': 0,
+            'new_len': 0,
+            'current_seq_len_before': 0,
+        } if enable_timing else None
+        
         new_len = cpu_norms.shape[0]
+        if timing:
+            timing['new_len'] = new_len
 
+        if enable_timing:
+            t0 = time.perf_counter()
         with self._lock:
+            if enable_timing:
+                timing['lock_wait_time'] = time.perf_counter() - t0
+                timing['current_seq_len_before'] = self.current_seq_len
+            
             # Safety truncate
             if new_len > MAX_SEQ_LEN:
                 cpu_norms = cpu_norms[:MAX_SEQ_LEN]
@@ -87,27 +108,44 @@ class RequestL2NormData:
 
             # Initialization
             if self.num_layers_accumulated == 0:
+                if enable_timing:
+                    t1 = time.perf_counter()
                 self.buffer[:new_len].copy_(cpu_norms)
                 self.current_seq_len = new_len
                 self.num_layers_accumulated = 1
-                return
+                if enable_timing:
+                    timing['buffer_copy_time'] = time.perf_counter() - t1
+                return timing
 
             # Update overlapping part (Running Average)
             overlap_len = min(self.current_seq_len, new_len)
             n = self.num_layers_accumulated
             
+            if timing:
+                timing['overlap_len'] = overlap_len
+            
             if overlap_len > 0:
+                if enable_timing:
+                    t1 = time.perf_counter()
                 # In-place update: (old * n + new) / (n + 1)
                 self.buffer[:overlap_len].mul_(n).add_(cpu_norms[:overlap_len]).div_(n + 1)
+                if enable_timing:
+                    timing['buffer_update_time'] = time.perf_counter() - t1
 
             # Handle new tokens (Append)
             if new_len > self.current_seq_len:
+                if enable_timing:
+                    t1 = time.perf_counter()
                 self.buffer[self.current_seq_len : new_len].copy_(
                     cpu_norms[self.current_seq_len:]
                 )
                 self.current_seq_len = new_len
+                if enable_timing:
+                    timing['buffer_copy_time'] = time.perf_counter() - t1
 
             self.num_layers_accumulated += 1
+
+        return timing
 
     def get_norms(self, start_index: int = 0) -> List[float]:
         with self._lock:
@@ -364,9 +402,20 @@ class L2NormCache:
                 # 5. Update Cache (CPU dict operations)
                 if enable_granular:
                     t0 = time.perf_counter()
-                self.get_or_create_request(req_id).update_from_cpu(cpu_norms)
+                update_result = self.get_or_create_request(req_id).update_from_cpu(
+                    cpu_norms, enable_timing=enable_granular
+                )
                 if enable_granular:
                     timing['update_time'] += time.perf_counter() - t0
+                    # Log detailed update timing for first request (for diagnostics)
+                    if update_result and 'buffer_update_time' in update_result:
+                        # Only log if buffer_update_time is significant (>1ms)
+                        if update_result['buffer_update_time'] > 0.001:
+                            logger.info(
+                                f"L2 norm update detail: overlap_len={update_result['overlap_len']}, "
+                                f"buffer_update_time={update_result['buffer_update_time']*1000:.2f}ms, "
+                                f"buffer_copy_time={update_result['buffer_copy_time']*1000:.2f}ms"
+                            )
                 
             return timing
                 

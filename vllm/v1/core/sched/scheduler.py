@@ -1538,6 +1538,10 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
+        self.kv_eviction_overhead_time = 0.0
+        self.l2_norm_overhead_time = 0.0
+        self.accumulated_overhead_metrics.clear()
+
     def finish_requests(
         self, request_ids: str | Iterable[str], finished_status: RequestStatus
     ) -> None:
@@ -1591,10 +1595,6 @@ class Scheduler(SchedulerInterface):
             self.finished_req_ids_dict[request.client_index].add(request_id)
         
         self.request_eviction_data.pop(request.request_id, None)
-        
-        self.kv_eviction_overhead_time = 0.0
-        self.l2_norm_overhead_time = 0.0
-        self.accumulated_overhead_metrics.clear()
         
         if not delay_free_blocks:
             self._free_blocks(request)
@@ -1704,7 +1704,11 @@ class Scheduler(SchedulerInterface):
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
-            overhead_metrics=self.accumulated_overhead_metrics.copy() if self.accumulated_overhead_metrics else None,
+            overhead_metrics=(
+                self.accumulated_overhead_metrics.copy()
+                if self.accumulated_overhead_metrics
+                else None
+            ),
             kv_eviction_overhead_time=self.kv_eviction_overhead_time,
             l2_norm_overhead_time=self.l2_norm_overhead_time,
         )

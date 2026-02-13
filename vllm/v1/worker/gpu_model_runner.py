@@ -1085,8 +1085,11 @@ class GPUModelRunner(
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
-        torch.cuda.synchronize()
-        start_time = time.perf_counter()
+        self.overhead_metrics = OverheadMetrics()
+        
+        if self.l2_norm_cache.is_enabled:
+            torch.cuda.synchronize()
+            start_time = time.perf_counter()
         enable_granular = envs.VLLM_ENABLE_GRANULAR_METRICS
         eviction_blocktable_time = 0.0
         eviction_replace_kv_time = 0.0
@@ -1169,8 +1172,11 @@ class GPUModelRunner(
                             if enable_granular:
                                 eviction_blocktable_time += time.perf_counter() - t0
         
-        torch.cuda.synchronize()
-        self.kv_eviction_overhead_time = time.perf_counter() - start_time
+        if self.l2_norm_cache.is_enabled:
+            torch.cuda.synchronize()
+            self.kv_eviction_overhead_time = time.perf_counter() - start_time
+        else:
+            self.kv_eviction_overhead_time = 0.0
         
         # Update overhead_metrics with eviction breakdown
         self.overhead_metrics.kv_eviction_blocktable_time = eviction_blocktable_time
@@ -3545,15 +3551,16 @@ class GPUModelRunner(
                 **model_kwargs,
             )
         
-        # Calculate time for l2 norm computation with granular breakdown
-        torch.cuda.synchronize()
-        l2_norm_start_time = time.perf_counter()
-        # Add to L2 Norm after one forward pass
-        self._compute_l2_norms(attn_metadata_dict=attn_metadata, metrics=self.overhead_metrics)
-        torch.cuda.synchronize()
-        
-        # Set legacy field for backward compatibility  
-        self.l2_norm_overhead_time = time.perf_counter() - l2_norm_start_time
+        if self.l2_norm_cache.is_enabled:
+            # Calculate time for l2 norm computation with granular breakdown
+            torch.cuda.synchronize()
+            l2_norm_start_time = time.perf_counter()
+            # Add to L2 Norm after one forward pass
+            self._compute_l2_norms(attn_metadata_dict=attn_metadata, metrics=self.overhead_metrics)
+            torch.cuda.synchronize()
+            self.l2_norm_overhead_time = time.perf_counter() - l2_norm_start_time
+        else:
+            self.l2_norm_overhead_time = 0.0
         self.overhead_metrics.forward_steps = 1  # Incremented per step
         
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
