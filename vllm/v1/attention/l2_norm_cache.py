@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 
 
 # Add this near the top of your file
-MAX_SEQ_LEN = 100000
+MAX_SEQ_LEN = 150000
 
 @dataclass
 class RequestL2NormData:
@@ -31,46 +31,24 @@ class RequestL2NormData:
     )
     # Tracks the actual valid sequence length
     current_seq_len: int = 0
-    num_layers_accumulated: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def update(self, new_norms: torch.Tensor):
+    def update(self, new_norms: torch.Tensor, num_evicted_tokens: int=0):
         # Handle input shape and device
         if new_norms.dim() > 1:
             new_norms = new_norms.mean(dim=-1)
         new_norms = new_norms.detach().cpu()
         
         new_len = new_norms.shape[0]
+        total_len = new_len +  num_evicted_tokens
+        num_to_copy = total_len - self.current_seq_len
 
         with self._lock:
-            # Safety truncate
-            if new_len > MAX_SEQ_LEN:
-                new_norms = new_norms[:MAX_SEQ_LEN]
-                new_len = MAX_SEQ_LEN
-
-            # Initialization
-            if self.num_layers_accumulated == 0:
-                self.buffer[:new_len].copy_(new_norms)
-                self.current_seq_len = new_len
-                self.num_layers_accumulated = 1
-                return
-
-            # Update overlapping part (Running Average)
-            overlap_len = min(self.current_seq_len, new_len)
-            n = self.num_layers_accumulated
-            
-            if overlap_len > 0:
-                # In-place update: (old * n + new) / (n + 1)
-                self.buffer[:overlap_len].mul_(n).add_(new_norms[:overlap_len]).div_(n + 1)
-
-            # Handle new tokens (Append)
-            if new_len > self.current_seq_len:
-                self.buffer[self.current_seq_len : new_len].copy_(
-                    new_norms[self.current_seq_len:]
-                )
-                self.current_seq_len = new_len
-
-            self.num_layers_accumulated += 1
+            # Copy L2 norms as append 
+            self.buffer[self.current_seq_len : self.current_seq_len+num_to_copy].copy_(
+                new_norms[new_len-num_to_copy:new_len]
+            )
+            self.current_seq_len += num_to_copy
 
     def get_norms(self, start_index: int = 0) -> List[float]:
         with self._lock:
@@ -220,16 +198,13 @@ class L2NormCache:
     def update_norms_batch(
         self,
         request_ids: List[str],
-        key_cache: torch.Tensor,
-        block_table: torch.Tensor,
+        key_cache: List[torch.Tensor],
+        block_table: List[torch.Tensor],
         seq_lens: torch.Tensor,
         block_size: int,
-        layer_idx: Optional[int] = None,
+        num_evicted_tokens_list: dict[str, int],
     ):
         if not self._enabled or key_cache is None:
-            return
-            
-        if layer_idx is not None and not self.should_compute_for_layer(layer_idx):
             return
 
         try:
@@ -238,34 +213,42 @@ class L2NormCache:
                               if rid is not None and seq_lens[i].item() > 0]
             if not active_indices:
                 return
-
+            
             for idx in active_indices:
                 req_id = request_ids[idx]
                 seq_len = int(seq_lens[idx].item())
+                num_evicted_tokens = num_evicted_tokens_list.get(req_id, 0)
+                actual_len = seq_len - num_evicted_tokens
                 
-                # Get valid blocks
-                num_blocks = (seq_len + block_size - 1) // block_size
-                block_indices = block_table[idx, :num_blocks]
-                valid_mask = block_indices >= 0
-                if not valid_mask.any():
-                    continue
-                valid_blocks = block_indices[valid_mask]
-
-                # 1. Gather blocks [num_blocks, block_size, heads, head_size]
-                gathered_blocks = key_cache.index_select(0, valid_blocks)
+                norm_buffer = torch.zeros(actual_len, device=key_cache[0].device, dtype=torch.float32)
+                num_layers = len(key_cache)
+                                
+                for idx_layer, layer_tensor in enumerate(key_cache):
+                    # Get valid blocks
+                    num_blocks = (seq_len - num_evicted_tokens + block_size - 1) // block_size
+                    block_indices = block_table[idx_layer][idx, :num_blocks]
+                    valid_mask = block_indices >= 0
+                    if not valid_mask.any():
+                        continue
+                    valid_blocks = block_indices[valid_mask]
+                    
+                    # 1. Gather blocks [num_blocks, block_size, heads, head_size]
+                    gathered = layer_tensor.index_select(0, valid_blocks)
                 
-                # 2. Compute Norm per block FIRST to reduce size immediately
-                # [num_blocks, block_size]
-                block_norms = torch.norm(gathered_blocks.float(), p=2, dim=-1).mean(dim=-1)
+                    # 2. Compute Norm per block FIRST to reduce size immediately
+                    # [num_blocks, block_size]
+                    layer_norms = torch.norm(gathered.float(), p=2, dim=-1).mean(dim=-1)
+                    
+                    norm_buffer.add_(layer_norms.flatten()[:actual_len])
                 
                 # 3. Flatten and slice to exact seq_len (Zero-copy view usually)
-                final_norms = block_norms.flatten()[:seq_len]
+                final_norms = norm_buffer / num_layers
                 
                 # 4. Update Cache
-                self.get_or_create_request(req_id).update(final_norms)
+                self.get_or_create_request(req_id).update(final_norms, num_evicted_tokens)
                 
         except Exception as e:
-            logger.warning(f"Error computing L2 norms batch: {e}")
+            logger.info(f"Error computing L2 norms batch: {e}")
     
     def get_norms(self, request_id: str, start_index: int = 0) -> Optional[List[float]]:
         """
