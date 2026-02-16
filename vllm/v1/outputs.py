@@ -186,8 +186,6 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
-    
-    kv_eviction_overhead_time: float = 0.0
 
 
 # ModelRunnerOutput wrapper for async scheduling.

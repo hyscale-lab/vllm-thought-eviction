@@ -694,8 +694,6 @@ class GPUModelRunner(
         
         # To remember evicted ranges within the block
         self.evicted_ranges: dict[str, list[int]] = {}
-        
-        self.kv_eviction_overhead_time: float = 0.0
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -1082,7 +1080,6 @@ class GPUModelRunner(
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
-        start_time = time.monotonic()
         # Process evictions: Invalidate evicted blocks in the block table.
         # This ensures that the model does not attend to the freed blocks.
         evicted_ranges = scheduler_output.evictable_token_ranges_map
@@ -1153,7 +1150,7 @@ class GPUModelRunner(
                                 
                             if start_block < end_block:
                                 bt_np[req_index, start_block:end_block] = 0
-        self.kv_eviction_overhead_time = time.monotonic() - start_time       
+                            
  
     
     def _replace_kv_caches_sink(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
@@ -3704,7 +3701,6 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
-                kv_eviction_overhead_time=self.kv_eviction_overhead_time,
             )
 
         if not self.use_async_scheduling:

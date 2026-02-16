@@ -251,8 +251,6 @@ class Scheduler(SchedulerInterface):
                 max_num_kv_tokens=self.max_num_kv_tokens,
                 vllm_config=self.vllm_config,
             )
-        
-        self.kv_eviction_overhead_time: float = 0.0 
             
     def update_request_mask(self, request_id: str,
                             evictable_token_ranges: list[tuple[int, int]]):
@@ -1163,9 +1161,6 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
-        kv_eviction_overhead_time = model_runner_output.kv_eviction_overhead_time
-        
-        self.kv_eviction_overhead_time += kv_eviction_overhead_time
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1571,8 +1566,6 @@ class Scheduler(SchedulerInterface):
         
         self.request_eviction_data.pop(request.request_id, None)
         
-        self.kv_eviction_overhead_time = 0.0
-        
         if not delay_free_blocks:
             self._free_blocks(request)
 
@@ -1681,7 +1674,6 @@ class Scheduler(SchedulerInterface):
             kv_connector_stats=connector_stats_payload,
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
-            kv_eviction_overhead_time=self.kv_eviction_overhead_time,
         )
 
     def make_spec_decoding_stats(
