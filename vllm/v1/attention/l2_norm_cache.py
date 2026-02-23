@@ -34,7 +34,7 @@ class RequestL2NormData:
     num_layers_accumulated: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def update(self, new_norms: torch.Tensor, request_id: str = "<unknown>"):
+    def update(self, new_norms: torch.Tensor):
         # Handle input shape and device
         if new_norms.dim() > 1:
             new_norms = new_norms.mean(dim=-1)
