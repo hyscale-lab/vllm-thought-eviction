@@ -270,7 +270,7 @@ class L2NormCache:
                 final_norms = block_norms.flatten()[:seq_len]
                 
                 # 4. Update Cache
-                self.get_or_create_request(req_id).update(final_norms, request_id=req_id)
+                self.get_or_create_request(req_id).update(final_norms)
                 
         except Exception as e:
             logger.warning(f"Error computing L2 norms batch: {e}")
