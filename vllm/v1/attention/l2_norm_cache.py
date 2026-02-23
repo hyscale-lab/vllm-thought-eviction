@@ -294,9 +294,8 @@ class L2NormCache:
     def remove_request(self, request_id: str):
         """Remove L2 norm data for a completed request."""
         with self._data_lock:
-            if request_id in self._request_data:
-                logger.debug(f"[L2_NORM_DEBUG] remove_request() called for request_id={request_id}")
-                self._request_data.pop(request_id, None)
+            logger.debug(f"[L2_NORM_DEBUG] remove_request() called for request_id={request_id}")
+            self._request_data.pop(request_id, None)
     
     def clear(self):
         """Clear all cached data."""
