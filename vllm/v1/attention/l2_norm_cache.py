@@ -34,7 +34,7 @@ class RequestL2NormData:
     num_layers_accumulated: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
-    def update(self, new_norms: torch.Tensor):
+    def update(self, new_norms: torch.Tensor, request_id: str = "<unknown>"):
         # Handle input shape and device
         if new_norms.dim() > 1:
             new_norms = new_norms.mean(dim=-1)
@@ -77,6 +77,13 @@ class RequestL2NormData:
             if start_index >= self.current_seq_len:
                 return []
             return self.buffer[start_index:self.current_seq_len].tolist()
+    
+    def reset(self):
+        """Reset the buffer state for reuse."""
+        with self._lock:
+            self.current_seq_len = 0
+            self.num_layers_accumulated = 0
+            # Note: We don't need to zero the buffer since we track valid length
 
 
 class L2NormCache:
@@ -190,6 +197,7 @@ class L2NormCache:
         with self._data_lock:
             if request_id not in self._request_data:
                 self._request_data[request_id] = RequestL2NormData()
+                logger.debug(f"[L2_NORM_DEBUG] Created NEW RequestL2NormData for request_id={request_id}")
             return self._request_data[request_id]
     
     def update_norms(
@@ -262,7 +270,7 @@ class L2NormCache:
                 final_norms = block_norms.flatten()[:seq_len]
                 
                 # 4. Update Cache
-                self.get_or_create_request(req_id).update(final_norms)
+                self.get_or_create_request(req_id).update(final_norms, request_id=req_id)
                 
         except Exception as e:
             logger.warning(f"Error computing L2 norms batch: {e}")
@@ -286,7 +294,9 @@ class L2NormCache:
     def remove_request(self, request_id: str):
         """Remove L2 norm data for a completed request."""
         with self._data_lock:
-            self._request_data.pop(request_id, None)
+            if request_id in self._request_data:
+                logger.debug(f"[L2_NORM_DEBUG] remove_request() called for request_id={request_id}")
+                self._request_data.pop(request_id, None)
     
     def clear(self):
         """Clear all cached data."""
