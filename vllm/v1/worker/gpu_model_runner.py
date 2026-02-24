@@ -1230,22 +1230,31 @@ class GPUModelRunner(
             idx_to_name = sorted(attn_metadata_dict.keys())
         except (IndexError, ValueError):
             idx_to_name = list(attn_metadata_dict.keys())
-        
+                
+        layers_to_compute: list[torch.tensor] = []
+        block_table_list = []
+        seq_lens = 0
         
         for layer_idx, kv_cache in enumerate(self.kv_caches):
             if self.l2_norm_cache.should_compute_for_layer(layer_idx):
                 # kv_cache shape: [2, num_blocks, block_size, num_heads, head_size]
-                key_cache = kv_cache[0]
+                layers_to_compute.append(kv_cache[0])
                 attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
-                # Update all requests 
-                self.l2_norm_cache.update_norms_batch(
-                    request_ids=list(self.requests.keys()),
-                    key_cache=key_cache,
-                    block_table=attn_metadata.block_table,
-                    seq_lens=attn_metadata.seq_lens,
-                    block_size=self.cache_config.block_size,
-                    layer_idx=layer_idx
-                )
+                block_table_list.append(attn_metadata.block_table)
+                seq_lens=attn_metadata.seq_lens
+        
+        # Case where no layers computed 
+        if not layers_to_compute:
+            return
+        
+        self.l2_norm_cache.update_norms_batch(
+            request_ids=list(self.requests.keys()),
+            key_cache=layers_to_compute,
+            block_table=block_table_list,
+            seq_lens=seq_lens,
+            block_size=self.cache_config.block_size,
+        )
+        
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor
