@@ -42,10 +42,22 @@ class RequestL2NormData:
         new_len = new_norms.shape[0]
 
         with self._lock:
-            # Copy L2 norms as append 
-            self.buffer[self.current_seq_len : new_len].copy_(
-                new_norms[self.current_seq_len:new_len]
-            )
+            # Handle case where buffer is smaller than new_norms 
+            if new_len > self.buffer.size(0):
+                # Allocate 10000 more tokens spaces for l2 norms
+                self.buffer = torch.zeros(
+                    new_len + 10000, 
+                    dtype=self.buffer.dtype, 
+                    device=self.buffer.device
+                )
+                self.buffer[:new_len].copy_(
+                    new_norms[:new_len]
+                )
+            else:
+                # Copy L2 norms as append 
+                self.buffer[self.current_seq_len : new_len].copy_(
+                    new_norms[self.current_seq_len:new_len]
+                )
             self.current_seq_len = new_len
 
     def get_norms(self, start_index: int = 0) -> List[float]:

@@ -1243,6 +1243,10 @@ class GPUModelRunner(
                 block_table_list.append(attn_metadata.block_table)
                 seq_lens=attn_metadata.seq_lens
         
+        # Case where no layers computed 
+        if not layers_to_compute:
+            return
+        
         self.l2_norm_cache.update_norms_batch(
             request_ids=list(self.requests.keys()),
             key_cache=layers_to_compute,
