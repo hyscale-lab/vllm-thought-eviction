@@ -55,7 +55,7 @@ class RequestL2NormData:
                 )
             else:
                 # Copy L2 norms as append 
-                self.buffer[self.current_seq_len : new_len].copy_(
+                self.buffer[self.current_seq_len:new_len].copy_(
                     new_norms[self.current_seq_len:new_len]
                 )
             self.current_seq_len = new_len
@@ -70,7 +70,6 @@ class RequestL2NormData:
         """Reset the buffer state for reuse."""
         with self._lock:
             self.current_seq_len = 0
-            self.num_layers_accumulated = 0
             # Note: We don't need to zero the buffer since we track valid length
 
 
