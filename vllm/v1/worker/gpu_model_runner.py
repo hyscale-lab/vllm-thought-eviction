@@ -1134,6 +1134,17 @@ class GPUModelRunner(
                             self.num_evicted_tokens_list[req_id] = current_total_len - num_survivors
 
                             self.evicted_ranges[req_id] = ranges
+                            
+                            # Update cache request state 
+                            if group_id < len(req_state.block_ids):
+                                block_ids_list = req_state.block_ids[group_id]
+                                start_block = (num_survivors + block_size - 1) // block_size
+                                end_block = current_total_len // block_size
+                                for block_idx in range(start_block, end_block):
+                                        if block_idx < len(block_ids_list):
+                                            block_ids_list[block_idx] = 0
+                                if start_block < end_block:
+                                    bt_np[req_index, start_block:end_block]
                                 
         self.kv_eviction_overhead_time = time.monotonic() - start_time
     

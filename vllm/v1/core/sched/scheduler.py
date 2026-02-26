@@ -267,8 +267,6 @@ class Scheduler(SchedulerInterface):
 
     def _process_evictions(self) -> None:
         """Process evictable token ranges and free corresponding physical blocks."""
-        if not self.request_eviction_data:
-            return
 
         block_size = self.kv_cache_manager.block_size
         if block_size is None:
@@ -283,25 +281,10 @@ class Scheduler(SchedulerInterface):
             
             num_blocks_needed = (num_survivors + block_size - 1) // block_size
             
-            blocks_to_free = list(range(num_blocks_needed, (num_tokens // block_size)+1))
+            blocks_to_free = list(range(num_blocks_needed, (num_tokens // block_size)))
             
             if blocks_to_free:
                 self.kv_cache_manager.free_blocks(request_id, blocks_to_free)
-
-        # for request_id, ranges in self.request_eviction_data.items():
-        #     blocks_to_free: set[int] = set()
-        #     for start, end in ranges:
-        #         # Calculate block index range fully covered by [start, end)
-        #         # start_block = ceil(start / block_size)
-        #         start_block = (start + block_size - 1) // block_size
-        #         # end_block = floor(end / block_size)
-        #         end_block = end // block_size
-                
-        #         if start_block < end_block:
-        #             blocks_to_free.update(range(start_block, end_block))
-            
-        #     if blocks_to_free:
-        #         self.kv_cache_manager.free_blocks(request_id, list(blocks_to_free))
                 
     def schedule(self) -> SchedulerOutput:
         # Process evictions first to free up blocks
