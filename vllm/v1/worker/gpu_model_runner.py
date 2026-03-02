@@ -1106,8 +1106,9 @@ class GPUModelRunner(
         self.input_batch.refresh_metadata()
         
         if self.l2_norm_cache.is_enabled:
-            torch.cuda.synchronize()
-            start_time = time.perf_counter()
+            eviction_start_event = torch.cuda.Event(enable_timing=True)
+            eviction_end_event = torch.cuda.Event(enable_timing=True)
+            eviction_start_event.record()
             
         enable_granular = envs.VLLM_ENABLE_GRANULAR_METRICS
         eviction_blocktable_time = 0.0
@@ -1147,8 +1148,9 @@ class GPUModelRunner(
                             self.evicted_ranges[req_id] = ranges
                             
         if self.l2_norm_cache.is_enabled:
-            torch.cuda.synchronize()
-            self.kv_eviction_overhead_time = time.perf_counter() - start_time
+            eviction_end_event.record()
+            eviction_end_event.synchronize()
+            self.kv_eviction_overhead_time = eviction_start_event.elapsed_time(eviction_end_event) / 1000.0
         else:
             self.kv_eviction_overhead_time = 0.0
             
@@ -3550,12 +3552,14 @@ class GPUModelRunner(
         
         if self.l2_norm_cache.is_enabled:
             # Calculate time for l2 norm computation with granular breakdown
-            torch.cuda.synchronize()
-            l2_norm_start_time = time.perf_counter()
+            l2_start_event = torch.cuda.Event(enable_timing=True)
+            l2_end_event = torch.cuda.Event(enable_timing=True)
+            l2_start_event.record()
             # Add to L2 Norm after one forward pass
             self._compute_l2_norms(attn_metadata_dict=attn_metadata, metrics=self.overhead_metrics)
-            torch.cuda.synchronize()
-            self.l2_norm_overhead_time = time.perf_counter() - l2_norm_start_time
+            l2_end_event.record()
+            l2_end_event.synchronize()
+            self.l2_norm_overhead_time = l2_start_event.elapsed_time(l2_end_event) / 1000.0
         else:
             self.l2_norm_overhead_time = 0.0
         self.overhead_metrics.forward_steps = 1  # Incremented per step
