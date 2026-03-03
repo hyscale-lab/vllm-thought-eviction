@@ -209,12 +209,12 @@ class L2NormCache:
         
         Returns:
             Optional dict with timing breakdown (only if VLLM_ENABLE_GRANULAR_METRICS is set):
-            - sync_time: Time for .item() calls (CPU-side, measured with perf_counter)
-            - gather_time: Time for index_select operations (GPU-side, measured with CUDA events)
-            - compute_time: Time for torch.norm computation (GPU-side, measured with CUDA events)
-            - flatten_time: Time for flatten/slice operations (GPU-side, measured with CUDA events)
-            - cpu_transfer_time: Time for GPU->CPU transfer (unused, kept for API compat)
-            - update_time: Time to update request buffers (CPU-side, measured with perf_counter)
+            - sync_time: Time for CUDA synchronization / .item() calls
+            - gather_time: Time for index_select operations
+            - compute_time: Time for torch.norm computation
+            - flatten_time: Time for flatten/slice operations
+            - cpu_transfer_time: Time for GPU->CPU transfer (.cpu() call)
+            - update_time: Time to update request buffers (CPU dict operations)
         """
         import time
         import vllm.envs as envs
@@ -233,12 +233,6 @@ class L2NormCache:
             'update_time': 0.0,
         } if enable_granular else None
 
-        # Collect CUDA event pairs for deferred elapsed_time queries
-        # Each list holds (start_event, end_event) tuples
-        gather_events: list = []
-        compute_events: list = []
-        flatten_events: list = []
-
         try:
             # Filter for active requests (note: .item() triggers sync per element)
             if enable_granular:
@@ -255,7 +249,7 @@ class L2NormCache:
             for idx in active_indices:
                 req_id = request_ids[idx]
                 
-                # .item() triggers CUDA sync — measure with perf_counter
+                # .item() triggers CUDA sync
                 if enable_granular:
                     t0 = time.perf_counter()
                 seq_len = int(seq_lens[idx].item())
@@ -278,62 +272,43 @@ class L2NormCache:
                     
                     # 1. Gather blocks [num_blocks, block_size, heads, head_size]
                     if enable_granular:
-                        ev_start = torch.cuda.Event(enable_timing=True)
-                        ev_end = torch.cuda.Event(enable_timing=True)
-                        ev_start.record()
+                        torch.cuda.synchronize()
+                        t0 = time.perf_counter()
                         
                     gathered = layer_tensor.index_select(0, valid_blocks)
-
                     if enable_granular:
-                        ev_end.record()
-                        gather_events.append((ev_start, ev_end))
+                        torch.cuda.synchronize()
+                        timing['gather_time'] += time.perf_counter() - t0
                 
                     # 2. Compute Norm per block FIRST to reduce size immediately and add the results to a buffer 
                     # [num_blocks, block_size]
                     if enable_granular:
-                        ev_start = torch.cuda.Event(enable_timing=True)
-                        ev_end = torch.cuda.Event(enable_timing=True)
-                        ev_start.record()
+                        torch.cuda.synchronize()
+                        t0 = time.perf_counter()
                         
                     layer_norms = torch.norm(gathered.float(), p=2, dim=-1).mean(dim=-1)    
                     norm_buffer.add_(layer_norms.flatten()[:actual_len])
                     
                     if enable_granular:
-                        ev_end.record()
-                        compute_events.append((ev_start, ev_end))
+                        torch.cuda.synchronize()
+                        timing['compute_time'] += time.perf_counter() - t0 
                 
                 # Take the average across the layers 
                 if enable_granular:
-                    ev_start = torch.cuda.Event(enable_timing=True)
-                    ev_end = torch.cuda.Event(enable_timing=True)
-                    ev_start.record()
-
+                    torch.cuda.synchronize()
+                    t0 = time.perf_counter()
                 final_norms = norm_buffer / num_layers
-
                 if enable_granular:
-                    ev_end.record()
-                    flatten_events.append((ev_start, ev_end))
+                    torch.cuda.synchronize()
+                    timing['flatten_time'] += time.perf_counter() - t0
                     
-                # 4. Update Cache (CPU-side — measure with perf_counter)
+                # 4. Update Cache
                 if enable_granular:
                     t0 = time.perf_counter()
                 self.get_or_create_request(req_id).update(final_norms, num_evicted_tokens)
                 if enable_granular:
                     timing['update_time'] += time.perf_counter() - t0
             
-            # Query all CUDA event elapsed times with a single final sync
-            if enable_granular and (gather_events or compute_events or flatten_events):
-                # Synchronize on the last recorded event to ensure all GPU work is done
-                last_event = (flatten_events or compute_events or gather_events)[-1][1]
-                last_event.synchronize()
-                
-                for ev_start, ev_end in gather_events:
-                    timing['gather_time'] += ev_start.elapsed_time(ev_end) / 1000.0
-                for ev_start, ev_end in compute_events:
-                    timing['compute_time'] += ev_start.elapsed_time(ev_end) / 1000.0
-                for ev_start, ev_end in flatten_events:
-                    timing['flatten_time'] += ev_start.elapsed_time(ev_end) / 1000.0
-
             return timing
                 
         except Exception as e:
