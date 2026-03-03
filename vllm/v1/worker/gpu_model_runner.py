@@ -3550,7 +3550,7 @@ class GPUModelRunner(
                 **model_kwargs,
             )
         
-        if self.l2_norm_cache.is_enabled:
+        if self.l2_norm_cache.is_enabled and self.l2_norm_cache.l2_norm_layers is not None:
             # Calculate time for l2 norm computation with granular breakdown
             l2_start_event = torch.cuda.Event(enable_timing=True)
             l2_end_event = torch.cuda.Event(enable_timing=True)

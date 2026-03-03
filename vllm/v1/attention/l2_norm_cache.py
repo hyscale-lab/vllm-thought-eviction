@@ -82,7 +82,7 @@ class L2NormCache:
         """Initialize the cache."""
         self._request_data: Dict[str, RequestL2NormData] = {}
         self._data_lock = threading.Lock()
-        self._enabled = True
+        self._enabled = False
         # Layer filtering: None means use all layers, otherwise use only specified layers
         self._l2_norm_layers: Optional[List[int]] = None
         self._skip_layers: Optional[List[int]] = None  # Alternative: skip these layers
