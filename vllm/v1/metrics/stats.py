@@ -189,10 +189,6 @@ class SchedulerStats:
 
     perf_stats: PerfStats | None = None
     
-    # Granular overhead metrics (imported from outputs)
-    overhead_metrics: dict | None = None  # OverheadMetrics.to_dict()
-    
-    # Legacy fields for backward compatibility
     kv_eviction_overhead_time: float = 0.0
 
 @dataclass
