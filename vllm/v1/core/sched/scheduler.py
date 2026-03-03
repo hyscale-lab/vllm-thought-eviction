@@ -273,11 +273,13 @@ class Scheduler(SchedulerInterface):
         if block_size is None:
             return
 
-
-        for request_id, req in enumerate(self.running):
-            # Blocks to free is just the tail end of the request
-            num_tokens = req.num_tokens 
+        for req in self.running:
+            # Only process if there are evicted tokens
             num_evicted_tokens = req.num_evicted_tokens
+            if num_evicted_tokens <= 0:
+                continue
+
+            num_tokens = req.num_tokens
             num_survivors = num_tokens - num_evicted_tokens
             
             num_blocks_needed = (num_survivors + block_size - 1) // block_size
@@ -285,7 +287,7 @@ class Scheduler(SchedulerInterface):
             blocks_to_free = list(range(num_blocks_needed, (num_tokens // block_size)))
             
             if blocks_to_free:
-                self.kv_cache_manager.free_blocks(request_id, blocks_to_free)
+                self.kv_cache_manager.free_blocks(req.request_id, blocks_to_free)
                 
     def schedule(self) -> SchedulerOutput:
         # Process evictions first to free up blocks
