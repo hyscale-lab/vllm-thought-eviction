@@ -262,6 +262,8 @@ class SingleTypeKVCacheManager(ABC):
                 blocks[idx] = self._null_block
 
         if blocks_to_free:
+            # self.req_to_blocks[request_id] = [block for block in self.req_to_blocks[request_id] if block != self._null_block]
+            # self.num_cached_block[request_id] = len(self.req_to_blocks[request_id]) - len(blocks_to_free)
             self.block_pool.free_blocks(blocks_to_free)
             
     def free(self, request_id: str) -> None:

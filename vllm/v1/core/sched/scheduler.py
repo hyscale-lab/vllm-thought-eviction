@@ -272,19 +272,22 @@ class Scheduler(SchedulerInterface):
         block_size = self.kv_cache_manager.block_size
         if block_size is None:
             return
-
-
-        for request_id, req in enumerate(self.running):
+        
+        for request_id, ranges in self.request_eviction_data.items():
             # Blocks to free is just the tail end of the request
+            req = self.requests.get(request_id, None)
+            if not req:
+                return None
             num_tokens = req.num_tokens 
-            num_evicted_tokens = req.num_evicted_tokens
-            num_survivors = num_tokens - num_evicted_tokens
+            num_survivors = req.num_computed_tokens
             
-            num_blocks_needed = (num_survivors + block_size - 1) // block_size
+            num_blocks_needed = (num_survivors + block_size) // block_size
             
-            blocks_to_free = list(range(num_blocks_needed, (num_tokens // block_size)))
+            blocks_to_free = list(range(num_blocks_needed, (num_tokens // block_size)+1))
             
             if blocks_to_free:
+                logger.info(f"num_survivors: {num_survivors}, num_tokens: {num_tokens}")
+                logger.info(f"req.num_tokens : {req.num_tokens}, req.num_computed_tokens : {req.num_computed_tokens}, req.num_evicted_tokens: {req.num_evicted_tokens}")
                 self.kv_cache_manager.free_blocks(request_id, blocks_to_free)
                 
     def schedule(self) -> SchedulerOutput:
@@ -1165,7 +1168,7 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
-        
+
         # Accumulate granular overhead metrics
         if model_runner_output.overhead_metrics is not None:
             om = model_runner_output.overhead_metrics
@@ -1224,7 +1227,9 @@ class Scheduler(SchedulerInterface):
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
             request.num_evicted_tokens = num_evicted_tokens_list[req_index]
-
+            if request.num_evicted_tokens != 0:
+                request.num_computed_tokens = request.num_tokens - request.num_evicted_tokens + 1
+            
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )

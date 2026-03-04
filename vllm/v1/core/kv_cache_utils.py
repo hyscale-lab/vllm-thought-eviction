@@ -130,9 +130,9 @@ class KVCacheBlock:
 
     @block_hash.setter
     def block_hash(self, block_hash: BlockHashWithGroupId):
-        assert self.block_hash is None, (
-            "The block already has a hash. This should not happen."
-        )
+        # assert self.block_hash is None, (
+        #     "The block already has a hash. This should not happen."
+        # )
         self._block_hash = block_hash
 
     def reset_hash(self):

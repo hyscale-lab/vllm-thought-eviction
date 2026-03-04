@@ -1145,6 +1145,17 @@ class GPUModelRunner(
                             self.num_evicted_tokens_list[req_id] = current_total_len - num_survivors
 
                             self.evicted_ranges[req_id] = ranges
+                
+                        # if group_id < len(req_state.block_ids):
+                        #     block_ids_list = req_state.block_ids[group_id]
+                        #     start_block = (num_survivors + block_size) // block_size
+                            
+                        #     # Mark as evicted in the Python list
+                        #     for block_idx in range(start_block, len(block_ids_list)):
+                        #         block_ids_list[block_idx] = 0
+                            
+                        #     logger.info(f"num_survivors: {num_survivors}")
+                        #     logger.info(f"block_ids_list: {block_ids_list}")
                             
         if self.l2_norm_cache.is_enabled:
             torch.cuda.synchronize()
@@ -1623,7 +1634,7 @@ class GPUModelRunner(
         # Get positions.
         positions_np = self.positions.np[:total_num_scheduled_tokens]
         np.add(
-            self.input_batch.num_computed_tokens_cpu[req_indices] - self.input_batch.num_evicted_tokens_cpu[req_indices],
+            self.input_batch.num_computed_tokens_cpu[req_indices],
             arange,
             out=positions_np,
         )
@@ -1716,7 +1727,7 @@ class GPUModelRunner(
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         self.seq_lens.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] - self.input_batch.num_evicted_tokens_cpu[:num_reqs] + num_scheduled_tokens
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
         )
         # Fill unused with 0 for full cuda graph mode.
         self.seq_lens.np[num_reqs:].fill(0)

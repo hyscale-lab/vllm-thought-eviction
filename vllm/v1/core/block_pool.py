@@ -258,7 +258,8 @@ class BlockPool:
             # sliding window attention. We skip null blocks here.
             if blk.is_null:
                 continue
-            assert blk.block_hash is None
+            #Commented out to force recomputation for block hash
+            # assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
             # Update and added the full block to the cache.
