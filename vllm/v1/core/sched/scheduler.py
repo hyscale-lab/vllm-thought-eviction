@@ -283,7 +283,7 @@ class Scheduler(SchedulerInterface):
             
             num_blocks_needed = (num_survivors + block_size - 1) // block_size
             
-            blocks_to_free = list(range(num_blocks_needed, (num_tokens // block_size)))
+            blocks_to_free = list(range(num_blocks_needed+1, (num_tokens // block_size) + 1))
             
             if blocks_to_free:
                 self.kv_cache_manager.free_blocks(req.request_id, blocks_to_free)
@@ -953,6 +953,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
+            # logger.info(f"req_to_new_blocks[req_id].get_block_ids(allow_none=True): {req_to_new_blocks[req_id].get_block_ids(allow_none=True)}")
             num_computed_tokens.append(req.num_computed_tokens)
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders

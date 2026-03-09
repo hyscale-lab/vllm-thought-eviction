@@ -1112,6 +1112,8 @@ class GPUModelRunner(
                 bt_np = block_table_obj.block_table.np
 
                 for req_id, ranges in evicted_ranges.items():
+                    # logger.info(f"bt_np: {bt_np[req_index].tolist()}")
+                    # logger.info(f"block_table_obj.num_blocks_per_row[req_index]: {block_table_obj.num_blocks_per_row[req_index]}")
                     if is_same_range(self.evicted_ranges.get(req_id, []), ranges):
                         continue
                     
@@ -1131,6 +1133,7 @@ class GPUModelRunner(
                             self.past_evicted_mask[req_id] = past_mask
                             
                             num_survivors = self._compact_kv_caches(req_index, past_mask, bt_np, block_size, ranges)
+                            
                             self.num_evicted_tokens_list[req_id] = current_total_len - num_survivors
 
                             self.evicted_ranges[req_id] = ranges
@@ -1138,13 +1141,14 @@ class GPUModelRunner(
                             # Update cache request state 
                             if group_id < len(req_state.block_ids):
                                 block_ids_list = req_state.block_ids[group_id]
-                                start_block = (num_survivors + block_size - 1) // block_size
-                                end_block = current_total_len // block_size
+                                start_block = ((num_survivors + block_size - 1) // block_size) + 1
+                                end_block = (current_total_len // block_size) + 1
                                 for block_idx in range(start_block, end_block):
                                         if block_idx < len(block_ids_list):
                                             block_ids_list[block_idx] = 0
                                 if start_block < end_block:
-                                    bt_np[req_index, start_block:end_block]
+                                    # bt_np[req_index, start_block:end_block] = 0
+                                    block_table_obj.num_blocks_per_row[req_index] = start_block
                                 
         self.kv_eviction_overhead_time = time.monotonic() - start_time
     
@@ -1159,7 +1163,7 @@ class GPUModelRunner(
         
         new_survivors = np.where(past_mask)[0]
         
-        current_phys_blocks = bt_np[req_index][bt_np[req_index] != 0]
+        current_phys_blocks = bt_np[req_index]
         
         # This finds the position of each 'new_survivor' token in the list of tokens 
         # that were present at the start of this function call.
@@ -1694,7 +1698,7 @@ class GPUModelRunner(
         # Record which requests should not be sampled,
         # so that we could clear the sampled tokens before returning
         self.discard_request_mask.np[:num_reqs] = (
-            self.seq_lens.np[:num_reqs] < num_tokens_np
+            self.seq_lens.np[:num_reqs] < (num_tokens_np - self.input_batch.num_evicted_tokens_cpu[:num_reqs])
         )
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
