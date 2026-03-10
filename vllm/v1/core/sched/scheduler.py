@@ -280,10 +280,10 @@ class Scheduler(SchedulerInterface):
 
             num_tokens = req.num_tokens
             num_survivors = num_tokens - num_evicted_tokens
+            num_blocks_needed = (num_survivors + block_size - 1) // block_size # ceil
+            total_blocks = (num_tokens + block_size - 1) // block_size  # ceil
             
-            num_blocks_needed = (num_survivors + block_size - 1) // block_size
-            
-            blocks_to_free = list(range(num_blocks_needed+1, (num_tokens // block_size) + 1))
+            blocks_to_free = list(range(num_blocks_needed + 1, total_blocks + 1))
             
             if blocks_to_free:
                 self.kv_cache_manager.free_blocks(req.request_id, blocks_to_free)
