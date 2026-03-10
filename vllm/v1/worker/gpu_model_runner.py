@@ -879,6 +879,7 @@ class GPUModelRunner(
             self.request_slot_mapping.pop(req_id, None)
             self.num_evicted_tokens_list.pop(req_id, None)
             self.past_evicted_mask.pop(req_id, None)
+            self.l2_norm_cache.remove_request(req_id)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -1107,6 +1108,7 @@ class GPUModelRunner(
         # This ensures that the model does not attend to the freed blocks.
         evicted_ranges = scheduler_output.evictable_token_ranges_map
         if evicted_ranges:
+            logger.info(f"[model_runner._prepare_inputs] Processing evictions for {len(evicted_ranges)} requests")
             for group_id, block_table_obj in enumerate(self.input_batch.block_table.block_tables):
                 block_size = block_table_obj.block_size
                 bt_np = block_table_obj.block_table.np
@@ -1141,14 +1143,24 @@ class GPUModelRunner(
                             # Update cache request state 
                             if group_id < len(req_state.block_ids):
                                 block_ids_list = req_state.block_ids[group_id]
+                                # DEBUG: Log block invalidation details
                                 start_block = ((num_survivors + block_size - 1) // block_size) + 1
                                 end_block = (current_total_len // block_size) + 1
+                                from vllm.logger import init_logger
+                                _logger = init_logger(__name__)
+                                _logger.info(f"[model_runner._prepare_inputs] Request {req_id}: "
+                                           f"current_total_len={current_total_len}, num_survivors={num_survivors}, "
+                                           f"block_size={block_size}")
+                                _logger.info(f"[model_runner._prepare_inputs] Invalidating block indices: "
+                                           f"start_block={start_block}, end_block={end_block}")
+                                _logger.info(f"[model_runner._prepare_inputs] Block IDs before: {block_ids_list}")
                                 for block_idx in range(start_block, end_block):
                                         if block_idx < len(block_ids_list):
                                             block_ids_list[block_idx] = 0
                                 if start_block < end_block:
                                     # bt_np[req_index, start_block:end_block] = 0
                                     block_table_obj.num_blocks_per_row[req_index] = start_block
+                                _logger.info(f"[model_runner._prepare_inputs] Block IDs after: {block_ids_list}")
                                 
         self.kv_eviction_overhead_time = time.monotonic() - start_time
     
