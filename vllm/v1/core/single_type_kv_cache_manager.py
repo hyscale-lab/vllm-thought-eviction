@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
-from vllm.logger import init_logger
+# from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-logger = init_logger(__name__)
+# logger = init_logger(__name__)
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -266,10 +266,10 @@ class SingleTypeKVCacheManager(ABC):
 
         if blocks_to_free:
             # Log the freeing action
-            physical_block_ids = [b.block_id for b in blocks_to_free]
-            logger.info(f"[single_type_kv_cache_manager.free_blocks] Request {request_id}: "
-                       f"Freeing {len(blocks_to_free)} blocks at virtual indices {block_indices}, "
-                       f"physical IDs: {physical_block_ids}")
+            # physical_block_ids = [b.block_id for b in blocks_to_free]
+            # logger.info(f"[single_type_kv_cache_manager.free_blocks] Request {request_id}: "
+            #            f"Freeing {len(blocks_to_free)} blocks at virtual indices {block_indices}, "
+            #            f"physical IDs: {physical_block_ids}")
             self.block_pool.free_blocks(blocks_to_free)
             self.req_to_blocks[request_id] = [block for block in blocks if block.block_id != 0]
             

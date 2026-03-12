@@ -263,7 +263,7 @@ class Scheduler(SchedulerInterface):
         when the request is scheduled.
         """
         self.request_eviction_data[request_id] = evictable_token_ranges
-        logger.debug(f"Stored evictable ranges for request {request_id}")
+        # logger.info(f"[SERVER] Stored evictable ranges for request {request_id}: {evictable_token_ranges}")
 
     def _process_evictions(self) -> None:
         """Process evictable token ranges and free corresponding physical blocks."""
@@ -284,6 +284,20 @@ class Scheduler(SchedulerInterface):
             total_blocks = (num_tokens + block_size - 1) // block_size  # ceil
             
             blocks_to_free = list(range(num_blocks_needed + 1, total_blocks + 1))
+
+            # DEBUG: Log block freeing details
+            # logger.info(f"[scheduler._process_evictions] Request {req.request_id}: "
+            #            f"num_tokens={num_tokens}, num_evicted={num_evicted_tokens}, "
+            #            f"num_survivors={num_survivors}, block_size={block_size}")
+            # logger.info(f"[scheduler._process_evictions] blocks_to_free (virtual indices): {blocks_to_free}")
+            
+            # Get current blocks for this request to show physical IDs
+            # try:
+            #     req_blocks = self.kv_cache_manager.coordinator.get_blocks(req.request_id)
+            #     physical_blocks = [b.block_id for sublist in req_blocks for b in sublist]
+            #     logger.info(f"[scheduler._process_evictions] Current physical blocks: {physical_blocks}")
+            # except Exception as e:
+            #     logger.warning(f"[scheduler._process_evictions] Could not get block info: {e}")
             
             if blocks_to_free:
                 self.kv_cache_manager.free_blocks(req.request_id, blocks_to_free)
@@ -779,15 +793,15 @@ class Scheduler(SchedulerInterface):
         evictable_token_ranges_map: dict[str, list[tuple[int, int]]] = {}
         all_scheduled_reqs = (scheduled_new_reqs + scheduled_resumed_reqs +
                                 scheduled_running_reqs)
-        logger.debug(f"All scheduled reqs: {[req.request_id for req in all_scheduled_reqs]}") # All scheduled reqs: ['chatcmpl-q1_c1_clustering']
-        logger.debug(f"Request Eviction Data: {self.request_eviction_data}")
+        # logger.info(f"[SCHEDULER] All scheduled reqs: {[req.request_id for req in all_scheduled_reqs]}")
+        # logger.info(f"[SCHEDULER] Request Eviction Data: {self.request_eviction_data}")
         for req in all_scheduled_reqs:
             if ranges := self.request_eviction_data.get(req.request_id):
-                logger.debug(req.request_id)
-                logger.debug(ranges)
+                # logger.info(f"[SCHEDULER] Request {req.request_id} - evictable ranges from client: {ranges}")
+                # logger.info(f"[SCHEDULER] Request {req.request_id} - current num_tokens: {req.num_tokens}, num_evicted_tokens: {req.num_evicted_tokens}")
                 evictable_token_ranges_map[req.request_id] = ranges
                 
-        logger.debug(f"Evictable Token Ranges Map: {evictable_token_ranges_map}")
+        # logger.info(f"[SCHEDULER] Evictable Token Ranges Map: {evictable_token_ranges_map}")
         
         # Construct the scheduler output.
         if self.use_v2_model_runner:
