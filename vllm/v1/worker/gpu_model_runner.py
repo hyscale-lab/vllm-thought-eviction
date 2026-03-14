@@ -1107,6 +1107,7 @@ class GPUModelRunner(
         # Process evictions: Invalidate evicted blocks in the block table.
         # This ensures that the model does not attend to the freed blocks.
         evicted_ranges = scheduler_output.evictable_token_ranges_map
+
         if evicted_ranges:
             # logger.info(f"[model_runner._prepare_inputs] Processing evictions for {len(evicted_ranges)} requests")
             for group_id, block_table_obj in enumerate(self.input_batch.block_table.block_tables):
@@ -1114,12 +1115,12 @@ class GPUModelRunner(
                 bt_np = block_table_obj.block_table.np
 
                 for req_id, ranges in evicted_ranges.items():
-                    # logger.info(f"bt_np: {bt_np[req_index].tolist()}")
+                    req_index = self.input_batch.req_id_to_index.get(req_id)
+                    # logger.info(f"bt_np: {[num for num in bt_np[req_index].tolist() if num != 0]}")
                     # logger.info(f"block_table_obj.num_blocks_per_row[req_index]: {block_table_obj.num_blocks_per_row[req_index]}")
                     if is_same_range(self.evicted_ranges.get(req_id, []), ranges):
                         continue
                     
-                    req_index = self.input_batch.req_id_to_index.get(req_id)
                     if req_index is not None:
                         if req_id in self.requests:
                             req_state = self.requests[req_id]
@@ -1135,6 +1136,7 @@ class GPUModelRunner(
                             self.past_evicted_mask[req_id] = past_mask
                             
                             num_survivors = self._compact_kv_caches(req_index, past_mask, bt_np, block_size, ranges)
+                            
                             
                             self.num_evicted_tokens_list[req_id] = current_total_len - num_survivors
 
@@ -1783,6 +1785,16 @@ class GPUModelRunner(
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
+            
+        
+        # Recalculate Positions, to ensure that RoPE is applied correctly.
+        # Block table uses position to compute_slot_mapping, so recomputation has to be done here instead.
+        positions_np = self.positions.np[:total_num_scheduled_tokens]
+        np.add(
+            self.input_batch.num_computed_tokens_cpu[req_indices],
+            arange,
+            out=positions_np,
+        )
 
         return (
             logits_indices,
