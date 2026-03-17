@@ -272,6 +272,7 @@ class SingleTypeKVCacheManager(ABC):
             #            f"physical IDs: {physical_block_ids}")
             self.block_pool.free_blocks(blocks_to_free)
             self.req_to_blocks[request_id] = [block for block in blocks if block.block_id != 0]
+            self.num_cached_block[request_id] = len(self.req_to_blocks[request_id])
             
     def free(self, request_id: str) -> None:
         """
