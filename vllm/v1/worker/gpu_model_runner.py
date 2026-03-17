@@ -1158,7 +1158,7 @@ class GPUModelRunner(
                                         if block_idx < len(block_ids_list):
                                             block_ids_list[block_idx] = 0
                                 if start_block < end_block:
-                                    # bt_np[req_index, start_block:end_block] = 0
+                                    bt_np[req_index, start_block:end_block] = 0
                                     block_table_obj.num_blocks_per_row[req_index] = start_block
                                 # logger.info(f"[model_runner._prepare_inputs] Block IDs after: {block_ids_list}")
                                 
@@ -1288,7 +1288,7 @@ class GPUModelRunner(
                 seq_lens=attn_metadata.seq_lens
         
         self.l2_norm_cache.update_norms_batch(
-            request_ids=list(self.requests.keys()),
+            request_ids=list(self.input_batch.req_ids),
             key_cache=layers_to_compute,
             block_table=block_table_list,
             seq_lens=seq_lens,
@@ -1795,6 +1795,7 @@ class GPUModelRunner(
             arange,
             out=positions_np,
         )
+        self.positions.copy_to_gpu(total_num_scheduled_tokens)
 
         return (
             logits_indices,

@@ -72,7 +72,7 @@ def run_test_generation():
     payload = {
         "model": MODEL_PATH,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 3000,
+        "max_tokens": 1000,
         "temperature": 0.6,
         "stream": True,  # <--- CRITICAL: This prevents the call from blocking
         "request_id": "test",

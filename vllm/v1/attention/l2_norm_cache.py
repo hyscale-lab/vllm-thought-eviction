@@ -218,33 +218,34 @@ class L2NormCache:
                 req_id = request_ids[idx]
                 seq_len = int(seq_lens[idx].item())
                 num_evicted_tokens = num_evicted_tokens_list.get(req_id, 0)
-                actual_len = seq_len - num_evicted_tokens
-                
-                norm_buffer = torch.zeros(actual_len, device=key_cache[0].device, dtype=torch.float32)
+
+                # seq_len is the post-eviction KV cache length (from attn_metadata).
+                # Do NOT subtract num_evicted_tokens again — it's already excluded.
+                norm_buffer = torch.zeros(seq_len, device=key_cache[0].device, dtype=torch.float32)
                 num_layers = len(key_cache)
-                                
+
                 for idx_layer, layer_tensor in enumerate(key_cache):
                     # Get valid blocks
-                    num_blocks = (seq_len - num_evicted_tokens + block_size - 1) // block_size
+                    num_blocks = (seq_len + block_size - 1) // block_size
                     block_indices = block_table[idx_layer][idx, :num_blocks]
-                    valid_mask = block_indices >= 0
+                    valid_mask = (block_indices >= 0) & (block_indices < layer_tensor.shape[0])
                     if not valid_mask.any():
                         continue
                     valid_blocks = block_indices[valid_mask]
-                    
+
                     # 1. Gather blocks [num_blocks, block_size, heads, head_size]
                     gathered = layer_tensor.index_select(0, valid_blocks)
-                
+
                     # 2. Compute Norm per block FIRST to reduce size immediately
                     # [num_blocks, block_size]
                     layer_norms = torch.norm(gathered.float(), p=2, dim=-1).mean(dim=-1)
-                    
-                    norm_buffer.add_(layer_norms.flatten()[:actual_len])
-                
-                # 3. Flatten and slice to exact seq_len (Zero-copy view usually)
+
+                    norm_buffer.add_(layer_norms.flatten()[:seq_len])
+
+                # 3. Average across layers
                 final_norms = norm_buffer / num_layers
-                
-                # 4. Update Cache
+
+                # 4. Update Cache — pass num_evicted_tokens for bookkeeping only
                 self.get_or_create_request(req_id).update(final_norms, num_evicted_tokens)
                 
         except Exception as e:
