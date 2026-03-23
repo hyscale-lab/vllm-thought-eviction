@@ -19,6 +19,59 @@ For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
 
 ---
 
+## This repo implemented an updated KV eviction mechanism 
+
+Architectural diagram documents the main code changes to the vLLM engine.
+
+```mermaid 
+flowchart TB
+    subgraph ClientProcess["Client Process"]
+        vllm_client["vllm_client.py"]
+        L2NormEvictionProcessor["L2NormEvictionProcessor"]
+        L2NormEvaluationClient["L2NormEvaluationClient"]
+    end
+
+    subgraph APIServerProcess["API Server Process"]
+        AsyncLLMEngine["AsyncLLM Engine"]
+        FastAPIEndpoints["FastAPI Endpoints"]
+    end
+
+    subgraph EngineCoreWorkerProcess["EngineCore Worker Process"]
+        direction TB
+        Scheduler["Scheduler"]
+        EngineCore["EngineCore"]
+        KVCacheManger["KVCacheManger"]
+        KVCacheCoordinator["KVCacheCoordinator"]
+        SingleTypeKVCacheManager["SingleTypeKVCacheManager"]
+        
+        Scheduler -- "_process_evictions(blocks_to_free)" --> KVCacheManger
+        KVCacheManger -- "free_blocks(request_id, block_indices)" --> KVCacheCoordinator
+        KVCacheCoordinator -- "free_blocks(block_indices)" --> SingleTypeKVCacheManager
+    end
+
+    subgraph GPUWorker["GPU Worker Process"]
+        direction TB
+        GPUModelRunner["GPU Model Runner"]
+        L2NormCache["L2NormCache"]
+        KVCache["KV Cache"]
+    end
+
+    Scheduler -- "schedule(evictable_token_ranges_map)" --> GPUModelRunner
+    GPUModelRunner -- "compute_l2_norms(kv_cache)" --> L2NormCache
+    GPUModelRunner -- "_compact_kv_caches()" --> KVCache
+    
+    L2NormEvaluationClient -- "1. POST /v1/chat/completions <br> stream=true" --> FastAPIEndpoints
+    L2NormEvaluationClient -- "2. POST /v1/attention/l2_norms <br> request_id" --> FastAPIEndpoints
+    L2NormEvaluationClient -- "3. POST /v1/kv_cache/evict <br> evictable_token_ranges" --> FastAPIEndpoints
+    
+    FastAPIEndpoints -- "RPC: evict_kv_blocks" --> EngineCore
+    FastAPIEndpoints -- "RPC: get_request_l2_norms" --> EngineCore
+    L2NormCache -- "get_norms(request_id)" --> EngineCore
+    EngineCore --> Scheduler
+
+    class L2NormCache redHighlight
+    classDef redHighlight stroke:#ff0000,stroke-width:4px,color:#ff0000,font-weight:bold
+```
 ## About
 
 vLLM is a fast and easy-to-use library for LLM inference and serving.
