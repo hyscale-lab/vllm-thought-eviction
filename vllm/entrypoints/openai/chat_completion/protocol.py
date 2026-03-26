@@ -165,6 +165,9 @@ class EvictionParams(OpenAIBaseModel):
     prune_after_tokens: int = Field(default=512, ge=0)
     min_segment_tokens: int = Field(default=15, ge=1)
     protect_first_thought: bool = True
+    # D-06: Token-count-based eviction trigger support
+    trigger_mode: Literal['time', 'token'] = 'time'
+    eviction_interval_tokens: int = Field(default=256, ge=1)
 
 
 class ChatCompletionRequest(OpenAIBaseModel):
