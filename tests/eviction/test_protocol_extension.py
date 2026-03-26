@@ -85,3 +85,51 @@ def test_all_four_strategies_accepted() -> None:
     for strategy in ("global", "thought_min", "thought_avg", "random"):
         params = EvictionParams(strategy=strategy)
         assert params.strategy == strategy
+
+
+# ---------------------------------------------------------------------------
+# D-06: trigger_mode and eviction_interval_tokens extension
+# ---------------------------------------------------------------------------
+
+def test_trigger_mode_default_is_time() -> None:
+    """EvictionParams() default trigger_mode is 'time'."""
+    params = EvictionParams()
+    assert params.trigger_mode == "time"
+
+
+def test_eviction_interval_tokens_default() -> None:
+    """EvictionParams() default eviction_interval_tokens is 256."""
+    params = EvictionParams()
+    assert params.eviction_interval_tokens == 256
+
+
+def test_trigger_mode_token_round_trips() -> None:
+    """EvictionParams(trigger_mode='token', eviction_interval_tokens=128) round-trips."""
+    params = EvictionParams(trigger_mode="token", eviction_interval_tokens=128)
+    assert params.trigger_mode == "token"
+    assert params.eviction_interval_tokens == 128
+
+
+def test_invalid_trigger_mode_rejected() -> None:
+    """EvictionParams(trigger_mode='invalid') raises ValidationError."""
+    with pytest.raises(ValidationError):
+        EvictionParams(trigger_mode="invalid")
+
+
+def test_eviction_interval_tokens_zero_rejected() -> None:
+    """EvictionParams(eviction_interval_tokens=0) raises ValidationError (ge=1)."""
+    with pytest.raises(ValidationError):
+        EvictionParams(eviction_interval_tokens=0)
+
+
+def test_existing_fields_preserve_defaults() -> None:
+    """After adding trigger_mode, existing fields retain their original defaults."""
+    params = EvictionParams()
+    assert params.strategy is None
+    assert params.keep_ratio == pytest.approx(0.7)
+    assert params.eviction_interval_seconds == pytest.approx(3.0)
+    assert params.eviction_delay_intervals == 0
+    assert params.retention_window_tokens == 512
+    assert params.prune_after_tokens == 512
+    assert params.min_segment_tokens == 15
+    assert params.protect_first_thought is True
