@@ -154,6 +154,19 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
+class EvictionParams(OpenAIBaseModel):
+    """Server-side KV cache eviction parameters for reasoning models."""
+
+    strategy: Literal["global", "thought_min", "thought_avg", "random"] | None = None
+    keep_ratio: float = Field(default=0.7, ge=0.0, le=1.0)
+    eviction_interval_seconds: float = Field(default=3.0, gt=0.0)
+    eviction_delay_intervals: int = Field(default=0, ge=0)
+    retention_window_tokens: int = Field(default=512, ge=0)
+    prune_after_tokens: int = Field(default=512, ge=0)
+    min_segment_tokens: int = Field(default=15, ge=1)
+    protect_first_thought: bool = True
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -344,6 +357,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+    eviction_params: EvictionParams | None = Field(
+        default=None,
+        description="Server-side KV cache eviction parameters for reasoning models.",
     )
 
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
