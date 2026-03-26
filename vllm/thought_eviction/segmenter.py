@@ -1,0 +1,229 @@
+"""
+Thought segmentation for server-side eviction.
+
+This module provides ThoughtSegment and ThoughtSegmenter for detecting thought
+boundaries within reasoning content and computing token-relative positions.
+
+ThoughtSegmenter parses <think>...</think> tagged content and splits it into
+discrete "thoughts" using 14 target linguistic boundary phrases. Token positions
+are computed using offset_mapping from the tokenizer and are relative to the
+start of the reasoning content (not absolute sequence positions).
+"""
+
+import re
+from dataclasses import dataclass, field
+from typing import Optional
+
+import numpy as np
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+@dataclass
+class ThoughtSegment:
+    """Represents a segment of text identified as a 'thought'."""
+
+    text: str
+    start_char_pos: int
+    end_char_pos: int
+    start_token_pos: int   # Relative to start of reasoning_content
+    end_token_pos: int     # Exclusive end
+    l2_norms: Optional[np.ndarray] = None
+    min_l2_norm: float = float('inf')
+    avg_l2_norm: float = float('inf')
+    evicted: bool = False
+
+
+class ThoughtSegmenter:
+    """
+    Segments reasoning content into discrete thoughts using linguistic markers.
+
+    Thought boundaries are detected using 14 target phrases that indicate a
+    new line of reasoning. Token positions are computed reasoning-relative via
+    tokenizer offset_mapping.
+
+    Args:
+        tokenizer: A callable tokenizer supporting return_offsets_mapping=True.
+            Must be passed as a pre-loaded instance (never loads from disk).
+        min_segment_tokens: Minimum tokens for a thought segment. Filtering at
+            this threshold is the caller's responsibility; the segmenter still
+            creates the segment. Default 15.
+    """
+
+    TARGET_PHRASES = [
+        "alternative", "Alternative", "Another", "But",
+        "Perhaps", "perhaps another", "Wait", "Oh wait",
+        "Now", "but wait", "Oh, so", "So", "In other words",
+        "Similarly"
+    ]
+
+    _think_start_pattern = re.compile(r'<think>', re.IGNORECASE)
+    _think_end_pattern = re.compile(r'</think>', re.IGNORECASE)
+
+    def __init__(self, tokenizer, min_segment_tokens: int = 15) -> None:
+        self._tokenizer = tokenizer
+        self._min_segment_tokens = min_segment_tokens
+
+        self._segmentation_pattern = re.compile(
+            r'(' + '|'.join(re.escape(p) for p in self.TARGET_PHRASES) + r')'
+        )
+
+        # Per-request mutable state
+        self._thoughts: list[ThoughtSegment] = []
+        self._processed_char_len: int = 0
+        self._reasoning_content: str = ""
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    @property
+    def thoughts(self) -> list[ThoughtSegment]:
+        """Read-only access to current thought list."""
+        return self._thoughts
+
+    def reset(self) -> None:
+        """Clear all state for a new request."""
+        self._thoughts = []
+        self._processed_char_len = 0
+        self._reasoning_content = ""
+
+    def extract_reasoning_span(self, text: str) -> tuple[int, int] | None:
+        """Extract character start/end of content between <think> and </think>.
+
+        Args:
+            text: Full generated text, potentially containing think tags.
+
+        Returns:
+            Tuple (start_char, end_char) of reasoning content inside think
+            tags, or None if no complete think span is found.
+        """
+        start_match = self._think_start_pattern.search(text)
+        if start_match is None:
+            return None
+
+        content_start = start_match.end()
+
+        end_match = self._think_end_pattern.search(text, content_start)
+        if end_match is None:
+            # Think block not yet closed — return span up to current end.
+            return (content_start, len(text))
+
+        return (content_start, end_match.start())
+
+    def update(self, reasoning_content: str) -> list[ThoughtSegment]:
+        """Segment new reasoning content into thoughts.
+
+        Processes only the text since the last call. The last existing thought
+        may be extended if the new text begins with non-separator content.
+        Token positions are recalculated after each update.
+
+        Args:
+            reasoning_content: Full accumulated reasoning content so far.
+
+        Returns:
+            Current list of ThoughtSegment objects (may grow between calls).
+        """
+        self._reasoning_content = reasoning_content
+        self._segment_new_text()
+        return self._thoughts
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _segment_new_text(self) -> None:
+        """Segment new reasoning content since last call."""
+        new_text = self._reasoning_content[self._processed_char_len:]
+        if not new_text:
+            return
+
+        current_char_offset = self._processed_char_len
+
+        parts = self._segmentation_pattern.split(new_text)
+
+        # First part: text before the first separator
+        if parts[0]:
+            if self._thoughts:
+                # Extend the last existing thought
+                self._thoughts[-1].text += parts[0]
+                self._thoughts[-1].end_char_pos += len(parts[0])
+                self._thoughts[-1].end_token_pos = -1
+            else:
+                self._thoughts.append(ThoughtSegment(
+                    text=parts[0],
+                    start_char_pos=current_char_offset,
+                    end_char_pos=current_char_offset + len(parts[0]),
+                    start_token_pos=-1,
+                    end_token_pos=-1,
+                ))
+            current_char_offset += len(parts[0])
+
+        # Remaining parts: [separator, text, separator, text, ...]
+        i = 1
+        while i < len(parts):
+            separator = parts[i]
+            text_part = parts[i + 1] if (i + 1) < len(parts) else ""
+            thought_text = separator + text_part
+
+            start_char = current_char_offset
+            end_char = start_char + len(thought_text)
+
+            self._thoughts.append(ThoughtSegment(
+                text=thought_text,
+                start_char_pos=start_char,
+                end_char_pos=end_char,
+                start_token_pos=-1,
+                end_token_pos=-1,
+            ))
+            current_char_offset = end_char
+            i += 2
+
+        self._processed_char_len = len(self._reasoning_content)
+        self._recalculate_token_positions()
+
+    def _recalculate_token_positions(self) -> None:
+        """Calculate token positions for all thoughts using full-text encoding.
+
+        Uses return_offsets_mapping=True to accurately map character positions
+        to token positions, avoiding boundary mismatches from per-thought
+        tokenization. Positions are relative to the start of reasoning_content.
+        """
+        if not self._thoughts:
+            return
+
+        encoding = self._tokenizer(
+            self._reasoning_content,
+            add_special_tokens=False,
+            return_offsets_mapping=True,
+        )
+        offset_mapping = encoding['offset_mapping']
+
+        for thought in self._thoughts:
+            char_start = thought.start_char_pos
+            char_end = thought.end_char_pos
+
+            # Find first token whose end is past char_start
+            token_start = None
+            for i, (tok_char_start, tok_char_end) in enumerate(offset_mapping):
+                if tok_char_end > char_start:
+                    token_start = i
+                    break
+
+            # Find last token whose start is before char_end
+            token_end = None
+            for i in range(len(offset_mapping) - 1, -1, -1):
+                tok_char_start, tok_char_end = offset_mapping[i]
+                if tok_char_start < char_end:
+                    token_end = i + 1  # Exclusive end
+                    break
+
+            if token_start is None:
+                token_start = len(offset_mapping)
+            if token_end is None:
+                token_end = 0
+
+            thought.start_token_pos = token_start
+            thought.end_token_pos = max(token_start, token_end)
