@@ -83,6 +83,7 @@ from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
+from vllm.thought_eviction.orchestrator import EvictionOrchestrator
 
 logger = init_logger(__name__)
 
@@ -439,6 +440,16 @@ class OpenAIServingChat(OpenAIServing):
 
         # Streaming response
         if request.stream:
+            # D-01: Wrap stream with eviction orchestrator when eviction_params present
+            if request.eviction_params is not None:
+                orchestrator = EvictionOrchestrator(
+                    eviction_params=request.eviction_params,
+                    engine_client=self.engine_client,
+                    tokenizer=tokenizer,
+                    request_id=request_id,
+                    block_size=self.engine_client.vllm_config.cache_config.block_size,
+                )
+                result_generator = orchestrator.wrap_stream(result_generator)
             return self.chat_completion_stream_generator(
                 request,
                 result_generator,
