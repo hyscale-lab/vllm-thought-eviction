@@ -272,6 +272,7 @@ class Scheduler(SchedulerInterface):
         if block_size is None:
             return
 
+        processed: list[str] = []
         for request_id, ranges in self.request_eviction_data.items():
             blocks_to_free: set[int] = set()
             for start, end in ranges:
@@ -280,12 +281,17 @@ class Scheduler(SchedulerInterface):
                 start_block = (start + block_size - 1) // block_size
                 # end_block = floor(end / block_size)
                 end_block = end // block_size
-                
+
                 if start_block < end_block:
                     blocks_to_free.update(range(start_block, end_block))
-            
+
             if blocks_to_free:
                 self.kv_cache_manager.free_blocks(request_id, list(blocks_to_free))
+            processed.append(request_id)
+
+        # Clear processed entries so ranges are not re-freed on next scheduler tick
+        for request_id in processed:
+            del self.request_eviction_data[request_id]
                 
     def schedule(self) -> SchedulerOutput:
         # Process evictions first to free up blocks
