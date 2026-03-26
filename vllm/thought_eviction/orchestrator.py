@@ -348,14 +348,15 @@ class EvictionOrchestrator:
             merged = merge_overlapping_ranges(all_ranges)
 
             # Apply retention window (ENG-05): protect the last N reasoning tokens
+            # Only apply when retention_window_tokens > 0 AND enough tokens exist.
+            # When retention_floor would be 0, all ranges would be discarded — skip.
             total_reasoning_tokens = len(self.accumulated_l2_norms)
             retention_window = self.params.retention_window_tokens
             if retention_window > 0 and total_reasoning_tokens > retention_window:
                 retention_floor = total_reasoning_tokens - retention_window
+                protected = apply_retention_window(merged, retention_floor)
             else:
-                retention_floor = 0
-
-            protected = apply_retention_window(merged, retention_floor)
+                protected = merged
 
             # Align to KV cache block boundaries (ENG-04)
             aligned = align_ranges_to_blocks(protected, self.block_size)
