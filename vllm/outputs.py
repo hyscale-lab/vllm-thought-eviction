@@ -104,6 +104,8 @@ class RequestOutput:
         encoder_prompt_token_ids: The token IDs of the encoder prompt.
                                   None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
+        new_l2_norms: Differential L2 norms from engine core (only new norms
+            since last step). None for non-eviction requests (D-03).
         kv_transfer_params: The params for remote K/V transfer.
     """
 
@@ -120,6 +122,7 @@ class RequestOutput:
         encoder_prompt: str | None = None,
         encoder_prompt_token_ids: list[int] | None = None,
         num_cached_tokens: int | None = None,
+        new_l2_norms: list[float] | None = None,
         *,
         multi_modal_placeholders: MultiModalPlaceholderDict | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
@@ -143,6 +146,7 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
+        self.new_l2_norms = new_l2_norms
         self.kv_transfer_params = kv_transfer_params
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:

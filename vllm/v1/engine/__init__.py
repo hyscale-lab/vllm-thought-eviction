@@ -144,6 +144,10 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+    # Differential L2 norms from engine core (only new norms since last step,
+    # D-03). None for non-eviction requests — omitted from serialization by
+    # omit_defaults=True so there is zero IPC overhead.
+    new_l2_norms: list[float] | None = None
 
     @property
     def finished(self) -> bool:
