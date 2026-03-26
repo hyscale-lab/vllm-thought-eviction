@@ -105,10 +105,10 @@ class TestSchedulerL2NormPopulation(unittest.TestCase):
         """Test: Finished requests have their _l2_norm_last_index entry cleaned up."""
         import inspect
         from vllm.v1.core.sched import scheduler as sched_module
-        # Check the finish_request method (or wherever request_eviction_data.pop is called)
-        source = inspect.getsource(sched_module.Scheduler._finish_request)
+        # Check the _free_request method (where request_eviction_data.pop is called)
+        source = inspect.getsource(sched_module.Scheduler._free_request)
         self.assertIn("_l2_norm_last_index", source,
-                      "_finish_request must clean up _l2_norm_last_index")
+                      "_free_request must clean up _l2_norm_last_index")
 
     def test_differential_indexing_via_source(self):
         """Test 3: Source shows differential index is updated after fetching norms."""

@@ -152,7 +152,10 @@ class Scheduler(SchedulerInterface):
         
         # req_id -> evictable ranges (managed by scheduler)
         self.request_eviction_data: dict[str, list[tuple[int, int]]] = {}
-        
+
+        # req_id -> last L2 norm index delivered (for differential updates, D-03)
+        self._l2_norm_last_index: dict[str, int] = {}
+
         # Scheduling policy
         try:
             self.policy = SchedulingPolicy(self.scheduler_config.policy)
@@ -1312,6 +1315,21 @@ class Scheduler(SchedulerInterface):
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None or kv_transfer_params:
+                # Fetch differential L2 norms if available (D-03, ENG-01).
+                # omit_defaults=True on EngineCoreOutput means None is omitted
+                # from serialization — zero IPC overhead for non-eviction requests.
+                new_l2_norms = None
+                try:
+                    from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
+                    l2_cache = get_l2_norm_cache()
+                    start_idx = self._l2_norm_last_index.get(req_id, 0)
+                    norms = l2_cache.get_norms(req_id, start_idx)
+                    if norms:
+                        new_l2_norms = norms
+                        self._l2_norm_last_index[req_id] = start_idx + len(norms)
+                except Exception:
+                    pass  # L2 norms not available — non-eviction request
+
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1328,6 +1346,7 @@ class Scheduler(SchedulerInterface):
                         num_cached_tokens=request.num_cached_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        new_l2_norms=new_l2_norms,
                     )
                 )
             else:
@@ -1571,7 +1590,8 @@ class Scheduler(SchedulerInterface):
             self.finished_req_ids_dict[request.client_index].add(request_id)
         
         self.request_eviction_data.pop(request.request_id, None)
-        
+        self._l2_norm_last_index.pop(request.request_id, None)
+
         if not delay_free_blocks:
             self._free_blocks(request)
 
