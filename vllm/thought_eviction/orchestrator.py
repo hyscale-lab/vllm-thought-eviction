@@ -172,7 +172,6 @@ class EvictionOrchestrator:
             delta_text = res.outputs[0].text or ""
 
         if delta_text:
-            prev_len = len(self.accumulated_text)
             self.accumulated_text += delta_text
 
             # Track <think> tag entry (only once per request)
@@ -181,40 +180,9 @@ class EvictionOrchestrator:
                 if start_match:
                     self._think_start_found = True
                     self._in_think_block = True
-                    # Compute reasoning_start_token_offset once we know prompt length
-                    if res.prompt_token_ids is not None and self.reasoning_start_token_offset is None:
-                        prompt_len = len(res.prompt_token_ids)
-                        prefix_text = self.accumulated_text[:start_match.end()]
-                        try:
-                            encoding = self.tokenizer(
-                                prefix_text,
-                                add_special_tokens=False,
-                                return_offsets_mapping=False,
-                            )
-                            prefix_token_count = len(encoding['input_ids'])
-                        except Exception:
-                            # Fallback: use space-split as rough estimate
-                            prefix_token_count = len(prefix_text.split())
-                        self.reasoning_start_token_offset = prompt_len + prefix_token_count
 
-            # Compute reasoning_start_token_offset if not yet set (delayed prompt_token_ids)
-            if (self._think_start_found
-                    and self.reasoning_start_token_offset is None
-                    and res.prompt_token_ids is not None):
-                start_match = _THINK_START_RE.search(self.accumulated_text)
-                if start_match:
-                    prompt_len = len(res.prompt_token_ids)
-                    prefix_text = self.accumulated_text[:start_match.end()]
-                    try:
-                        encoding = self.tokenizer(
-                            prefix_text,
-                            add_special_tokens=False,
-                            return_offsets_mapping=False,
-                        )
-                        prefix_token_count = len(encoding['input_ids'])
-                    except Exception:
-                        prefix_token_count = len(prefix_text.split())
-                    self.reasoning_start_token_offset = prompt_len + prefix_token_count
+            # Compute reasoning_start_token_offset once prompt token ids are available.
+            self._maybe_set_reasoning_start_token_offset(res)
 
             # Detect </think> tag to stop tracking reasoning content
             if self._in_think_block:
@@ -234,18 +202,47 @@ class EvictionOrchestrator:
                     else:
                         self.reasoning_content = self.accumulated_text[start_match.end():]
 
-            # Count new tokens from delta (approximate by token_ids if available)
-            if res.outputs and hasattr(res.outputs[0], 'token_ids') and res.outputs[0].token_ids:
-                # Use token_ids length delta — outputs[0].token_ids is cumulative
-                # We approximate: count tokens for this delta only
-                self.token_count_since_last_cycle += len(delta_text.split())
-            else:
-                # Approximate: 1 token per ~4 chars
+        # Count new tokens for the token-based trigger.
+        if res.outputs:
+            token_ids = getattr(res.outputs[0], 'token_ids', None)
+            if token_ids is not None:
+                # token_ids is the per-step token delta for this stream update.
+                self.token_count_since_last_cycle += len(token_ids)
+            elif delta_text:
+                # Fallback when token ids are unavailable: approximate from text size.
                 self.token_count_since_last_cycle += max(1, len(delta_text) // 4)
 
         # Extend L2 norms differentially (D-03, ENG-01)
         if res.new_l2_norms:
             self.accumulated_l2_norms.extend(res.new_l2_norms)
+
+    def _maybe_set_reasoning_start_token_offset(self, res: RequestOutput) -> None:
+        """Set reasoning_start_token_offset once <think> and prompt tokens are known."""
+        if not self._think_start_found:
+            return
+        if self.reasoning_start_token_offset is not None:
+            return
+        if res.prompt_token_ids is None:
+            return
+
+        start_match = _THINK_START_RE.search(self.accumulated_text)
+        if not start_match:
+            return
+
+        prompt_len = len(res.prompt_token_ids)
+        prefix_text = self.accumulated_text[:start_match.end()]
+        try:
+            encoding = self.tokenizer(
+                prefix_text,
+                add_special_tokens=False,
+                return_offsets_mapping=False,
+            )
+            prefix_token_count = len(encoding['input_ids'])
+        except Exception:
+            # Fallback: use space-split as rough estimate.
+            prefix_token_count = len(prefix_text.split())
+
+        self.reasoning_start_token_offset = prompt_len + prefix_token_count
 
     def _maybe_schedule_cycle(self) -> None:
         """Conditionally schedule an eviction cycle as a background task.
