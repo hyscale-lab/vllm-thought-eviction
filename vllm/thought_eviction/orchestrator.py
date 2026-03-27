@@ -119,6 +119,10 @@ class EvictionOrchestrator:
         self._generation_finished: bool = False
         self._pending_task: Optional[asyncio.Task] = None
 
+        # Phase 4: per-cycle eviction event accumulation for stats payload
+        self._eviction_events: list[dict] = []
+        self._start_time: float = time.monotonic()
+
     async def wrap_stream(
         self,
         result_generator: AsyncIterator[RequestOutput],
@@ -379,6 +383,15 @@ class EvictionOrchestrator:
             self.cycle_count += 1
 
             evicted_tokens = sum(e - s for s, e in aligned)
+
+            # Phase 4: accumulate per-cycle eviction event for stats payload
+            self._eviction_events.append({
+                "interval_number": self.cycle_count,
+                "tokens_evicted": evicted_tokens,
+                "ranges": [[s, e] for s, e in aligned],
+                "timestamp": round(time.monotonic() - self._start_time, 4),
+            })
+
             logger.info(
                 "Eviction cycle %d for %s: %d ranges, %d tokens evicted",
                 self.cycle_count,
@@ -396,3 +409,54 @@ class EvictionOrchestrator:
                 exc,
                 exc_info=True,
             )
+
+    def build_eviction_payload(self) -> dict:
+        """Build eviction statistics payload for the final SSE chunk.
+
+        Computes summary stats from the final segmenter state and returns
+        the full eviction payload matching the L2NormEvictionProcessor schema.
+
+        Returns:
+            Dict with 'summary', 'events', and 'masked_tokens' keys.
+            Returns zero-count summary if no eviction cycles completed.
+        """
+        masked_tokens = sum(e - s for s, e in self.permanently_evicted_ranges)
+
+        # Compute L2 summary from final segmenter state
+        thoughts = []
+        if self.reasoning_content:
+            try:
+                thoughts = self.segmenter.update(self.reasoning_content)
+            except Exception:
+                pass
+
+        evicted = [t for t in thoughts if t.evicted and t.min_l2_norm is not None]
+        kept = [t for t in thoughts if not t.evicted and t.min_l2_norm is not None]
+
+        summary = {
+            "total_thoughts": len(thoughts),
+            "evicted_thoughts": len(evicted),
+            "kept_thoughts": len(kept),
+            "avg_min_l2_evicted": (
+                round(float(np.mean([t.min_l2_norm for t in evicted])), 6)
+                if evicted else None
+            ),
+            "avg_min_l2_kept": (
+                round(float(np.mean([t.min_l2_norm for t in kept])), 6)
+                if kept else None
+            ),
+            "avg_avg_l2_evicted": (
+                round(float(np.mean([t.avg_l2_norm for t in evicted])), 6)
+                if evicted else None
+            ),
+            "avg_avg_l2_kept": (
+                round(float(np.mean([t.avg_l2_norm for t in kept])), 6)
+                if kept else None
+            ),
+        }
+
+        return {
+            "summary": summary,
+            "events": self._eviction_events,
+            "masked_tokens": masked_tokens,
+        }
