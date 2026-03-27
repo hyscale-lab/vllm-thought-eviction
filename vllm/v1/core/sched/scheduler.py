@@ -1321,14 +1321,23 @@ class Scheduler(SchedulerInterface):
                 new_l2_norms = None
                 try:
                     from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
-                    l2_cache = get_l2_norm_cache()
-                    start_idx = self._l2_norm_last_index.get(req_id, 0)
-                    norms = l2_cache.get_norms(req_id, start_idx)
-                    if norms:
-                        new_l2_norms = norms
-                        self._l2_norm_last_index[req_id] = start_idx + len(norms)
-                except Exception:
-                    pass  # L2 norms not available — non-eviction request
+                except ImportError:
+                    # Optional dependency path is unavailable for this runtime.
+                    get_l2_norm_cache = None
+
+                if get_l2_norm_cache is not None:
+                    try:
+                        l2_cache = get_l2_norm_cache()
+                        start_idx = self._l2_norm_last_index.get(req_id, 0)
+                        norms = l2_cache.get_norms(req_id, start_idx)
+                        if norms:
+                            new_l2_norms = norms
+                            self._l2_norm_last_index[req_id] = start_idx + len(norms)
+                    except Exception:
+                        logger.exception(
+                            "Unexpected error fetching L2 norms for request %s",
+                            req_id,
+                        )
 
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
