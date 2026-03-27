@@ -138,6 +138,9 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: UsageInfo | None = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    # Phase 4: optional eviction statistics, excluded for non-eviction requests
+    # via exclude_unset=True in model_dump_json (D-05)
+    eviction: dict | None = Field(default=None)
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):

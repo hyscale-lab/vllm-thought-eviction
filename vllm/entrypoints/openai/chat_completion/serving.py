@@ -441,6 +441,7 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         if request.stream:
             # D-01: Wrap stream with eviction orchestrator when eviction_params present
+            orchestrator = None
             if request.eviction_params is not None:
                 orchestrator = EvictionOrchestrator(
                     eviction_params=request.eviction_params,
@@ -458,6 +459,7 @@ class OpenAIServingChat(OpenAIServing):
                 conversation,
                 tokenizer,
                 request_metadata,
+                orchestrator=orchestrator,
             )
 
         try:
@@ -628,6 +630,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
+        orchestrator: "EvictionOrchestrator | None" = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -1308,6 +1311,10 @@ class OpenAIServingChat(OpenAIServing):
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
+
+                    # Phase 4: inject eviction stats on the finish_reason chunk (D-03)
+                    if orchestrator is not None and finish_reason_sent[i]:
+                        chunk.eviction = orchestrator.build_eviction_payload()
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
