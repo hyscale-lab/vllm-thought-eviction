@@ -1236,12 +1236,11 @@ class GPUModelRunner(
         seq_lens = 0
         
         for layer_idx, kv_cache in enumerate(self.kv_caches):
-            if self.l2_norm_cache.should_compute_for_layer(layer_idx):
-                # kv_cache shape: [2, num_blocks, block_size, num_heads, head_size]
-                layers_to_compute.append(kv_cache[0])
-                attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
-                block_table_list.append(attn_metadata.block_table)
-                seq_lens=attn_metadata.seq_lens
+            # kv_cache shape: [2, num_blocks, block_size, num_heads, head_size]
+            layers_to_compute.append(kv_cache[0])
+            attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
+            block_table_list.append(attn_metadata.block_table)
+            seq_lens = attn_metadata.seq_lens
         
         # Case where no layers computed 
         if not layers_to_compute:
