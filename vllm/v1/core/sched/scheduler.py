@@ -266,14 +266,19 @@ class Scheduler(SchedulerInterface):
         self.request_eviction_data[request_id] = evictable_token_ranges
         logger.debug(f"Stored evictable ranges for request {request_id}")
 
-    def _process_evictions(self) -> None:
-        """Process evictable token ranges and free corresponding physical blocks."""
+    def _process_evictions(self) -> dict[str, list[tuple[int, int]]]:
+        """Process evictable token ranges and free corresponding physical blocks.
+
+        Returns:
+            A dict mapping request_id to its evictable token ranges for all
+            requests that were processed this tick. Empty dict if no evictions.
+        """
         if not self.request_eviction_data:
-            return
+            return {}
 
         block_size = self.kv_cache_manager.block_size
         if block_size is None:
-            return
+            return {}
 
         processed: list[str] = []
         for request_id, ranges in self.request_eviction_data.items():
@@ -292,13 +297,21 @@ class Scheduler(SchedulerInterface):
                 self.kv_cache_manager.free_blocks(request_id, list(blocks_to_free))
             processed.append(request_id)
 
+        # Snapshot ranges before clearing so schedule() can pass them to the GPU runner
+        processed_ranges: dict[str, list[tuple[int, int]]] = {
+            req_id: self.request_eviction_data[req_id]
+            for req_id in processed
+        }
+
         # Clear processed entries so ranges are not re-freed on next scheduler tick
         for request_id in processed:
             del self.request_eviction_data[request_id]
+
+        return processed_ranges
                 
     def schedule(self) -> SchedulerOutput:
-        # Process evictions first to free up blocks
-        self._process_evictions()
+        # Process evictions first to free up blocks; capture ranges for SchedulerOutput
+        processed_ranges = self._process_evictions()
         
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -783,20 +796,6 @@ class Scheduler(SchedulerInterface):
                     )
                 )
         
-        # Collect evictable token ranges for scheduled requests
-        evictable_token_ranges_map: dict[str, list[tuple[int, int]]] = {}
-        all_scheduled_reqs = (scheduled_new_reqs + scheduled_resumed_reqs +
-                                scheduled_running_reqs)
-        logger.debug(f"All scheduled reqs: {[req.request_id for req in all_scheduled_reqs]}") # All scheduled reqs: ['chatcmpl-q1_c1_clustering']
-        logger.debug(f"Request Eviction Data: {self.request_eviction_data}")
-        for req in all_scheduled_reqs:
-            if ranges := self.request_eviction_data.get(req.request_id):
-                logger.debug(req.request_id)
-                logger.debug(ranges)
-                evictable_token_ranges_map[req.request_id] = ranges
-                
-        logger.debug(f"Evictable Token Ranges Map: {evictable_token_ranges_map}")
-        
         # Construct the scheduler output.
         if self.use_v2_model_runner:
             scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
@@ -845,7 +844,7 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            evictable_token_ranges_map=evictable_token_ranges_map or None,
+            evictable_token_ranges_map=processed_ranges or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
