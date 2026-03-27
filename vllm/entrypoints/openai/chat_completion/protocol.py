@@ -171,6 +171,9 @@ class EvictionParams(OpenAIBaseModel):
     # D-06: Token-count-based eviction trigger support
     trigger_mode: Literal['time', 'token'] = 'time'
     eviction_interval_tokens: int = Field(default=256, ge=1)
+    # D-01: Per-request layer selection for L2 norm computation (Phase 5)
+    # None = use all layers (existing behavior); list[int] = restrict to these model layer indices
+    l2_norm_layers: list[int] | None = None
 
 
 class ChatCompletionRequest(OpenAIBaseModel):
