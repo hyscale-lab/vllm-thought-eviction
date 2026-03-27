@@ -36,6 +36,7 @@ from vllm.thought_eviction.strategies import (
     RandomStrategy,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import EvictionParams
+from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
 
 logger = init_logger(__name__)
 
@@ -123,6 +124,10 @@ class EvictionOrchestrator:
         self._eviction_events: list[dict] = []
         self._start_time: float = time.monotonic()
 
+        # D-03: register per-request layer prefs with L2NormCache before streaming begins
+        _l2_cache = get_l2_norm_cache()
+        _l2_cache.set_request_layers(self.request_id, eviction_params.l2_norm_layers)
+
     async def wrap_stream(
         self,
         result_generator: AsyncIterator[RequestOutput],
@@ -156,6 +161,8 @@ class EvictionOrchestrator:
                     await self._pending_task
                 except asyncio.CancelledError:
                     pass
+            # D-05: clean up per-request L2NormCache data (both _request_data and _request_layer_prefs)
+            get_l2_norm_cache().remove_request(self.request_id)
 
     def _accumulate(self, res: RequestOutput) -> None:
         """Accumulate text, L2 norms, and reasoning content from one output.
