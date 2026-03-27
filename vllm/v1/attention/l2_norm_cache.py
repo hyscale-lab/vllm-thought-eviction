@@ -102,6 +102,8 @@ class L2NormCache:
         # Layer filtering: None means use all layers, otherwise use only specified layers
         self._l2_norm_layers: Optional[List[int]] = None
         self._skip_layers: Optional[List[int]] = None  # Alternative: skip these layers
+        # Per-request layer preferences: request_id -> layer indices (None = use global filter)
+        self._request_layer_prefs: Dict[str, Optional[List[int]]] = {}
     
     def enable(self):
         """Enable L2 norm computation."""
@@ -186,7 +188,31 @@ class L2NormCache:
                 self._request_data[request_id] = RequestL2NormData()
                 logger.debug(f"[L2_NORM_DEBUG] Created NEW RequestL2NormData for request_id={request_id}")
             return self._request_data[request_id]
-    
+
+    def set_request_layers(self, request_id: str, layers: Optional[List[int]]) -> None:
+        """Register per-request layer preferences for L2 norm filtering.
+
+        Args:
+            request_id: The request identifier.
+            layers: Layer indices to include in norm computation. None means use
+                    the global layer filter (or all layers if no global filter set).
+        """
+        with self._data_lock:
+            self._request_layer_prefs[request_id] = layers
+
+    def get_request_layers(self, request_id: str) -> Optional[List[int]]:
+        """Get registered layer prefs for a request.
+
+        Args:
+            request_id: The request identifier.
+
+        Returns:
+            Layer indices registered for this request, or None if not registered
+            (meaning use all layers or global filter).
+        """
+        with self._data_lock:
+            return self._request_layer_prefs.get(request_id)
+
     def update_norms(
         self,
         request_id: str,
@@ -233,11 +259,17 @@ class L2NormCache:
             for idx in active_indices:
                 req_id = request_ids[idx]
                 seq_len = int(seq_lens[idx].item())
-                
+
+                # Per-request layer filter (D-04): None = use all layers
+                req_layers = self.get_request_layers(req_id)
                 norm_buffer = torch.zeros(seq_len, device=key_cache[0].device, dtype=torch.float32)
-                num_layers = len(key_cache)
-                                
+                contributing_layer_count = 0
+
                 for idx_layer, layer_tensor in enumerate(key_cache):
+                    # Per-request layer filter (D-04): skip layers not in the request's include-list
+                    if req_layers is not None and idx_layer not in req_layers:
+                        continue
+
                     # Get valid blocks
                     num_blocks = (seq_len + block_size - 1) // block_size
                     block_indices = block_table[idx_layer][idx, :num_blocks]
@@ -245,19 +277,24 @@ class L2NormCache:
                     if not valid_mask.any():
                         continue
                     valid_blocks = block_indices[valid_mask]
-                    
+
                     # 1. Gather blocks [num_blocks, block_size, heads, head_size]
                     gathered = layer_tensor.index_select(0, valid_blocks)
-                
+
                     # 2. Compute Norm per block FIRST to reduce size immediately
                     # [num_blocks, block_size]
                     layer_norms = torch.norm(gathered.float(), p=2, dim=-1).mean(dim=-1)
-                    
+
                     norm_buffer.add_(layer_norms.flatten()[:seq_len])
-                
+                    contributing_layer_count += 1
+
+                # Divide by count of contributing layers (D-04 correctness fix)
+                if contributing_layer_count == 0:
+                    continue  # No layers contributed — skip update for this request
+
                 # 3. Flatten and slice to exact seq_len (Zero-copy view usually)
-                final_norms = norm_buffer / num_layers
-                
+                final_norms = norm_buffer / contributing_layer_count
+
                 # 4. Update Cache
                 self.get_or_create_request(req_id).update(final_norms)
                 
@@ -285,6 +322,7 @@ class L2NormCache:
         with self._data_lock:
             logger.debug(f"[L2_NORM_DEBUG] remove_request() called for request_id={request_id}")
             self._request_data.pop(request_id, None)
+            self._request_layer_prefs.pop(request_id, None)
     
     def clear(self):
         """Clear all cached data."""
