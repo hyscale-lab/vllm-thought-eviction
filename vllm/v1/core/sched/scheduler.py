@@ -1326,12 +1326,16 @@ class Scheduler(SchedulerInterface):
 
                 if get_l2_norm_cache is not None:
                     try:
-                        l2_cache = get_l2_norm_cache()
-                        start_idx = self._l2_norm_last_index.get(req_id, 0)
-                        norms = l2_cache.get_norms(req_id, start_idx)
-                        if norms:
-                            new_l2_norms = norms
-                            self._l2_norm_last_index[req_id] = start_idx + len(norms)
+                        # Phase 6: Only fetch norms for eviction-enabled requests.
+                        # The enable_l2_norms flag traveled via IPC on SamplingParams.
+                        if (request.sampling_params is not None
+                                and request.sampling_params.enable_l2_norms):
+                            l2_cache = get_l2_norm_cache()
+                            start_idx = self._l2_norm_last_index.get(req_id, 0)
+                            norms = l2_cache.get_norms(req_id, start_idx)
+                            if norms:
+                                new_l2_norms = norms
+                                self._l2_norm_last_index[req_id] = start_idx + len(norms)
                     except Exception:
                         logger.exception(
                             "Unexpected error fetching L2 norms for request %s",

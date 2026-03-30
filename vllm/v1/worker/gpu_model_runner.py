@@ -1246,12 +1246,18 @@ class GPUModelRunner(
         if not layers_to_compute:
             return
         
+        # Phase 6: Build per-request filter from IPC flag that traveled from API server.
+        eviction_req_ids = {
+            req_id for req_id, rs in self.requests.items()
+            if rs.sampling_params is not None and rs.sampling_params.enable_l2_norms
+        }
         self.l2_norm_cache.update_norms_batch(
             request_ids=list(self.requests.keys()),
             key_cache=layers_to_compute,
             block_table=block_table_list,
             seq_lens=seq_lens,
             block_size=self.cache_config.block_size,
+            eviction_request_ids=eviction_req_ids,
         )
         
 
@@ -1901,8 +1907,12 @@ class GPUModelRunner(
                 )
 
             # Get request IDs for L2 norm tracking
-            # Check if the builder supports request_ids and compute_l2_norms args
-            if get_l2_norm_cache().is_enabled:
+            # Phase 6: Guard on per-request IPC flag — only compute norms when at
+            # least one request in the batch has eviction enabled.
+            if get_l2_norm_cache().is_enabled and any(
+                rs.sampling_params is not None and rs.sampling_params.enable_l2_norms
+                for rs in self.requests.values()
+            ):
                 extra_attn_metadata_args['request_ids'] = list(self.input_batch.req_ids[:num_reqs])
                 extra_attn_metadata_args['compute_l2_norms'] = True
 
@@ -3489,7 +3499,12 @@ class GPUModelRunner(
             )
         
         # Add to L2 Norm after one forward pass
-        self._compute_l2_norms(attn_metadata_dict=attn_metadata)
+        # Phase 6: Only call when at least one request in the batch has eviction enabled.
+        if any(
+            rs.sampling_params is not None and rs.sampling_params.enable_l2_norms
+            for rs in self.requests.values()
+        ):
+            self._compute_l2_norms(attn_metadata_dict=attn_metadata)
         
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:

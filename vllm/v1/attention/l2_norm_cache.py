@@ -245,19 +245,23 @@ class L2NormCache:
         block_table: List[torch.Tensor],
         seq_lens: torch.Tensor,
         block_size: int,
+        eviction_request_ids: set[str] | None = None,
     ):
         if not self._enabled or key_cache is None:
             return
 
         try:
             # Filter for active requests
-            active_indices = [i for i, rid in enumerate(request_ids) 
+            active_indices = [i for i, rid in enumerate(request_ids)
                               if rid is not None and seq_lens[i].item() > 0]
             if not active_indices:
                 return
-            
+
             for idx in active_indices:
                 req_id = request_ids[idx]
+                # Phase 6: Skip non-eviction requests (IPC-based per-request guard).
+                if eviction_request_ids is not None and req_id not in eviction_request_ids:
+                    continue
                 seq_len = int(seq_lens[idx].item())
 
                 # Per-request layer filter (D-04): None = use all layers

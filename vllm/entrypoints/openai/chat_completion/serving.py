@@ -386,6 +386,11 @@ class OpenAIServingChat(OpenAIServing):
                         self.logits_processors,
                         sampling_params,
                     )
+                    # Phase 6: Set per-request L2 norm flag for IPC to EngineCore worker.
+                    # This flag travels with SamplingParams through EngineCoreRequest
+                    # to the GPU worker process, where it gates norm computation.
+                    if request.eviction_params is not None:
+                        sampling_params.enable_l2_norms = True
 
                 self._log_inputs(
                     sub_request_id,
