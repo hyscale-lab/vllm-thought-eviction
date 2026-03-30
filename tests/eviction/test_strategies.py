@@ -333,11 +333,12 @@ def test_thought_avg_strategy_uses_avg_not_min():
 def test_random_strategy_stable_scores():
     """Test 8: Calling compute_evictable_ranges twice gives identical results."""
     strategy = RandomStrategy(seed=42)
+    # Random strategy does not use L2 norms — use make_thought_no_l2
     thoughts = [
-        make_thought("t0", 0, 50, 0, 20),
-        make_thought("t1", 50, 100, 20, 40),
-        make_thought("t2", 100, 150, 40, 60),
-        make_thought("t3", 150, 200, 60, 80),
+        make_thought_no_l2("t0", 0, 50, 0, 20),
+        make_thought_no_l2("t1", 50, 100, 20, 40),
+        make_thought_no_l2("t2", 100, 150, 40, 60),
+        make_thought_no_l2("t3", 150, 200, 60, 80),
     ]
 
     # Reset evicted flags before second call
@@ -370,10 +371,11 @@ def test_random_strategy_stable_scores():
 def test_random_scores_keyed_on_start_char_pos():
     """Test 9: Scores in _thought_random_scores dict are keyed by start_char_pos."""
     strategy = RandomStrategy(seed=7)
+    # Random strategy does not use L2 norms — use make_thought_no_l2
     thoughts = [
-        make_thought("t0", 0, 50, 0, 20),
-        make_thought("t1", 100, 150, 20, 40),  # start_char_pos=100
-        make_thought("t2", 200, 250, 40, 60),  # start_char_pos=200
+        make_thought_no_l2("t0", 0, 50, 0, 20),
+        make_thought_no_l2("t1", 100, 150, 20, 40),  # start_char_pos=100
+        make_thought_no_l2("t2", 200, 250, 40, 60),  # start_char_pos=200
     ]
 
     strategy.compute_evictable_ranges(
@@ -392,13 +394,14 @@ def test_random_scores_keyed_on_start_char_pos():
 
 def test_random_strategy_different_seed_different_selection():
     """Test 10: Different seed may produce different selection."""
+    # Random strategy does not use L2 norms — use make_thought_no_l2
     thoughts = [
-        make_thought("t0", 0, 50, 0, 20),
-        make_thought("t1", 50, 100, 20, 40),
-        make_thought("t2", 100, 150, 40, 60),
-        make_thought("t3", 150, 200, 60, 80),
-        make_thought("t4", 200, 250, 80, 100),
-        make_thought("t5", 250, 300, 100, 120),
+        make_thought_no_l2("t0", 0, 50, 0, 20),
+        make_thought_no_l2("t1", 50, 100, 20, 40),
+        make_thought_no_l2("t2", 100, 150, 40, 60),
+        make_thought_no_l2("t3", 150, 200, 60, 80),
+        make_thought_no_l2("t4", 200, 250, 80, 100),
+        make_thought_no_l2("t5", 250, 300, 100, 120),
     ]
 
     results = set()
@@ -421,10 +424,11 @@ def test_random_strategy_different_seed_different_selection():
 def test_random_strategy_protect_first_thought():
     """Test 11: protect_first_thought=True skips first valid thought."""
     strategy = RandomStrategy(seed=42)
+    # Random strategy does not use L2 norms — use make_thought_no_l2
     thoughts = [
-        make_thought("t0", 0, 50, 0, 20),    # first valid — should be protected
-        make_thought("t1", 50, 100, 20, 40),
-        make_thought("t2", 100, 150, 40, 60),
+        make_thought_no_l2("t0", 0, 50, 0, 20),    # first valid — should be protected
+        make_thought_no_l2("t1", 50, 100, 20, 40),
+        make_thought_no_l2("t2", 100, 150, 40, 60),
     ]
 
     for _ in range(5):
@@ -444,10 +448,11 @@ def test_random_strategy_protect_first_thought():
 def test_random_strategy_reset_scores():
     """reset_scores() clears the score cache."""
     strategy = RandomStrategy(seed=42)
+    # Random strategy does not use L2 norms — use make_thought_no_l2
     thoughts = [
-        make_thought("t0", 0, 50, 0, 20),
-        make_thought("t1", 50, 100, 20, 40),
-        make_thought("t2", 100, 150, 40, 60),
+        make_thought_no_l2("t0", 0, 50, 0, 20),
+        make_thought_no_l2("t1", 50, 100, 20, 40),
+        make_thought_no_l2("t2", 100, 150, 40, 60),
     ]
 
     strategy.compute_evictable_ranges(

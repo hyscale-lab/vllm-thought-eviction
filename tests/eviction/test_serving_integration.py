@@ -113,3 +113,25 @@ def test_wrap_stream_wires_result_generator():
         "result_generator not reassigned from orchestrator.wrap_stream() — "
         "the wrapped generator won't reach chat_completion_stream_generator"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: enable_l2_norms is skipped for the random strategy
+# ---------------------------------------------------------------------------
+
+
+def test_enable_l2_norms_skipped_for_random_strategy():
+    """Verify enable_l2_norms is NOT set when strategy == 'random'.
+
+    Random eviction selects thoughts uniformly — L2 norm computation on the
+    GPU worker is unnecessary overhead and must be gated out for that strategy.
+    """
+    from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+    source = inspect.getsource(OpenAIServingChat.create_chat_completion)
+    assert 'strategy != "random"' in source, (
+        'enable_l2_norms must be guarded with strategy != "random" — '
+        "random strategy should not trigger L2 norm computation"
+    )
+    assert 'enable_l2_norms = True' in source, (
+        "enable_l2_norms = True must still be set for non-random eviction strategies"
+    )
