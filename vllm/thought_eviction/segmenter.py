@@ -75,6 +75,10 @@ class ThoughtSegmenter:
         self._processed_char_len: int = 0
         self._reasoning_content: str = ""
 
+        # Tokenization cache: avoid re-encoding the full text every cycle.
+        self._cached_offset_mapping: list[tuple[int, int]] = []
+        self._cached_text_len: int = 0
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -89,6 +93,8 @@ class ThoughtSegmenter:
         self._thoughts = []
         self._processed_char_len = 0
         self._reasoning_content = ""
+        self._cached_offset_mapping = []
+        self._cached_text_len = 0
 
     def extract_reasoning_span(self, text: str) -> tuple[int, int] | None:
         """Extract character start/end of content between <think> and </think>.
@@ -184,22 +190,53 @@ class ThoughtSegmenter:
         self._processed_char_len = len(self._reasoning_content)
         self._recalculate_token_positions()
 
-    def _recalculate_token_positions(self) -> None:
-        """Calculate token positions for all thoughts using full-text encoding.
+    # Number of cached tokens to re-tokenize on each update to correct
+    # BPE boundary effects.  The last few tokens of a prefix encoding can
+    # differ from the full-text encoding because BPE merges are greedy and
+    # context-dependent.  Re-tokenizing from a few tokens back ensures the
+    # boundary tokens are computed with sufficient right context.
+    _OVERLAP_TOKENS: int = 3
 
-        Uses return_offsets_mapping=True to accurately map character positions
-        to token positions, avoiding boundary mismatches from per-thought
-        tokenization. Positions are relative to the start of reasoning_content.
+    def _recalculate_token_positions(self) -> None:
+        """Calculate token positions for all thoughts using offset_mapping.
+
+        Caches the offset_mapping from previous calls. On each update the
+        last ``_OVERLAP_TOKENS`` cached tokens are discarded and the text
+        from that point forward is re-tokenized. This corrects BPE boundary
+        effects while keeping cost at O(overlap + delta) instead of O(n).
+
+        Positions are relative to the start of reasoning_content.
         """
         if not self._thoughts:
             return
 
-        encoding = self._tokenizer(
-            self._reasoning_content,
-            add_special_tokens=False,
-            return_offsets_mapping=True,
-        )
-        offset_mapping = encoding['offset_mapping']
+        text = self._reasoning_content
+        text_len = len(text)
+
+        if text_len > self._cached_text_len:
+            if self._cached_offset_mapping:
+                # Back up _OVERLAP_TOKENS tokens to correct boundary effects.
+                overlap_idx = max(
+                    0, len(self._cached_offset_mapping) - self._OVERLAP_TOKENS
+                )
+                retok_char_start = self._cached_offset_mapping[overlap_idx][0]
+                del self._cached_offset_mapping[overlap_idx:]
+            else:
+                retok_char_start = 0
+
+            encoding = self._tokenizer(
+                text[retok_char_start:],
+                add_special_tokens=False,
+                return_offsets_mapping=True,
+            )
+
+            self._cached_offset_mapping.extend(
+                (s + retok_char_start, e + retok_char_start)
+                for s, e in encoding['offset_mapping']
+            )
+            self._cached_text_len = text_len
+
+        offset_mapping = self._cached_offset_mapping
 
         for thought in self._thoughts:
             char_start = thought.start_char_pos

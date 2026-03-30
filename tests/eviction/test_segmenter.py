@@ -176,6 +176,88 @@ class TestTokenPositionMapping:
         offset_calls = [c for c in calls if c.kwargs.get('return_offsets_mapping', False)]
         assert len(offset_calls) >= 1, "Tokenizer should have been called with return_offsets_mapping=True"
 
+    def test_incremental_cache_matches_full_tokenization(self, mock_tokenizer):
+        """Cached incremental tokenization produces same positions as full-text.
+
+        SEG-03 regression: _recalculate_token_positions caches offset_mapping
+        and only tokenizes the new suffix. Verify that multiple incremental
+        update() calls produce identical token positions to a fresh segmenter
+        that receives the full text in one shot.
+
+        Chunk boundaries are chosen mid-thought (not at separators) so
+        _segment_new_text sees the same separators as single-shot, isolating
+        the tokenization-cache behavior under test.
+        """
+        full_text = (
+            "First thought content here. "      # ends at 28
+            "But second thought is longer. "     # ends at 58
+            "Wait third thought arrives. "       # ends at 85
+            "Perhaps a fourth thought too."      # ends at 114
+        )
+
+        # Chunks land mid-thought, never bisecting a separator word.
+        # --- Incremental: feed text in 3 growing chunks ---
+        inc = ThoughtSegmenter(mock_tokenizer)
+        inc.update(full_text[:35])   # mid "second"
+        inc.update(full_text[:70])   # mid "arrives"
+        inc_thoughts = inc.update(full_text)  # full text
+
+        # --- Single-shot: feed full text at once ---
+        single = ThoughtSegmenter(mock_tokenizer)
+        single_thoughts = single.update(full_text)
+
+        assert len(inc_thoughts) == len(single_thoughts), (
+            f"Thought count mismatch: incremental={len(inc_thoughts)}, "
+            f"single={len(single_thoughts)}"
+        )
+        for i, (it, st) in enumerate(zip(inc_thoughts, single_thoughts)):
+            assert it.text == st.text, (
+                f"Thought {i} text mismatch: {it.text!r} vs {st.text!r}"
+            )
+            assert it.start_token_pos == st.start_token_pos, (
+                f"Thought {i} start_token_pos mismatch: "
+                f"{it.start_token_pos} vs {st.start_token_pos}"
+            )
+            assert it.end_token_pos == st.end_token_pos, (
+                f"Thought {i} end_token_pos mismatch: "
+                f"{it.end_token_pos} vs {st.end_token_pos}"
+            )
+            assert it.start_char_pos == st.start_char_pos, (
+                f"Thought {i} start_char_pos mismatch: "
+                f"{it.start_char_pos} vs {st.start_char_pos}"
+            )
+            assert it.end_char_pos == st.end_char_pos, (
+                f"Thought {i} end_char_pos mismatch: "
+                f"{it.end_char_pos} vs {st.end_char_pos}"
+            )
+
+    def test_cache_retokenizes_overlap_plus_suffix(self, mock_tokenizer):
+        """Tokenizer is called with overlap window + new suffix, not full text.
+
+        Verifies the O(overlap + delta) optimization: after the initial call,
+        subsequent update() calls back up _OVERLAP_TOKENS tokens and
+        re-tokenize from that point forward — not the entire text.
+        """
+        segmenter = ThoughtSegmenter(mock_tokenizer)
+        text_v1 = "First thought here. "  # 20 chars → 4 tokens at 5 chars each
+        text_v2 = text_v1 + "But second thought."
+
+        segmenter.update(text_v1)
+        mock_tokenizer.reset_mock()
+
+        segmenter.update(text_v2)
+
+        assert mock_tokenizer.call_count == 1
+        call_args = mock_tokenizer.call_args
+        tokenized_text = call_args[0][0]
+
+        # Should NOT be the full text (39 chars)
+        assert tokenized_text != text_v2, "Should not re-tokenize the full text"
+        # Should include the suffix
+        assert tokenized_text.endswith("But second thought.")
+        # Should include overlap from cached tokens (backed up 3 tokens)
+        assert len(tokenized_text) > len("But second thought.")
+
     def test_thoughts_property_is_readonly_view(self, mock_tokenizer):
         """thoughts property returns current list without allowing internal mutation."""
         segmenter = ThoughtSegmenter(mock_tokenizer)
