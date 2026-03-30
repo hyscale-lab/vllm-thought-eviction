@@ -389,7 +389,9 @@ class OpenAIServingChat(OpenAIServing):
                     # Phase 6: Set per-request L2 norm flag for IPC to EngineCore worker.
                     # This flag travels with SamplingParams through EngineCoreRequest
                     # to the GPU worker process, where it gates norm computation.
-                    if request.eviction_params is not None:
+                    # Random strategy selects thoughts uniformly — no L2 norms needed.
+                    if (request.eviction_params is not None
+                            and request.eviction_params.strategy != "random"):
                         sampling_params.enable_l2_norms = True
 
                 self._log_inputs(
