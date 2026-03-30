@@ -238,16 +238,12 @@ class EvictionOrchestrator:
 
         prompt_len = len(res.prompt_token_ids)
         prefix_text = self.accumulated_text[:start_match.end()]
-        try:
-            encoding = self.tokenizer(
-                prefix_text,
-                add_special_tokens=False,
-                return_offsets_mapping=False,
-            )
-            prefix_token_count = len(encoding['input_ids'])
-        except Exception:
-            # Fallback: use space-split as rough estimate.
-            prefix_token_count = len(prefix_text.split())
+        encoding = self.tokenizer(
+            prefix_text,
+            add_special_tokens=False,
+            return_offsets_mapping=False,
+        )
+        prefix_token_count = len(encoding['input_ids'])
 
         self.reasoning_start_token_offset = prompt_len + prefix_token_count
 
