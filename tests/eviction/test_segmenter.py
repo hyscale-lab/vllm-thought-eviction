@@ -112,6 +112,46 @@ class TestSegmentReasoningWithTargetPhrases:
         assert thoughts_after_second[0].text.startswith("First")
         assert thoughts_after_second[1].text.startswith("But")
 
+    def test_separator_spanning_chunk_boundary(self, mock_tokenizer):
+        """Separators split across chunk boundaries are detected.
+
+        SEG-02 regression: if a chunk boundary falls in the middle of a
+        separator phrase (e.g. 'B' | 'ut'), the separator must still be
+        detected via the overlap window in _segment_new_text.
+        """
+        full_text = (
+            "First thought content here. "       # 28 chars
+            "But second thought is longer. "      # 30 chars, ends at 58
+            "Perhaps another way to see it. "     # 31 chars, ends at 89
+            "Oh wait, I see the answer now."      # 30 chars, ends at 119
+        )
+
+        # Chunks deliberately bisect separators:
+        #   chunk 1 ends at 29 → "...here. B" (splits "But")
+        #   chunk 2 ends at 60 → "...longer. P" (splits "Perhaps")
+        #   chunk 3 ends at 92 → "...it. Oh w" (splits "Oh wait")
+        segmenter = ThoughtSegmenter(mock_tokenizer)
+        segmenter.update(full_text[:29])
+        segmenter.update(full_text[:60])
+        segmenter.update(full_text[:92])
+        thoughts = segmenter.update(full_text)
+
+        # Single-shot for comparison
+        single = ThoughtSegmenter(mock_tokenizer)
+        single_thoughts = single.update(full_text)
+
+        assert len(thoughts) == len(single_thoughts), (
+            f"Thought count: incremental={len(thoughts)}, single={len(single_thoughts)}. "
+            f"Inc texts: {[t.text[:30] for t in thoughts]}, "
+            f"Single texts: {[t.text[:30] for t in single_thoughts]}"
+        )
+        for i, (it, st) in enumerate(zip(thoughts, single_thoughts)):
+            assert it.text == st.text, (
+                f"Thought {i} text mismatch: {it.text!r} vs {st.text!r}"
+            )
+            assert it.start_char_pos == st.start_char_pos
+            assert it.end_char_pos == st.end_char_pos
+
     def test_short_thoughts_still_created(self, mock_tokenizer):
         """Thoughts with fewer tokens than min_segment_tokens are still created.
 
