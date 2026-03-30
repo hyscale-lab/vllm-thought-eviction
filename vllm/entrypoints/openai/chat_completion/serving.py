@@ -443,6 +443,14 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
+        # Eviction requires streaming — reject non-streaming requests early.
+        if request.eviction_params is not None and not request.stream:
+            return self.create_error_response(
+                "eviction_params requires stream=true. "
+                "Server-side eviction operates on the streaming token "
+                "pipeline and cannot run on non-streaming requests.",
+            )
+
         # Streaming response
         if request.stream:
             # D-01: Wrap stream with eviction orchestrator when eviction_params present
