@@ -62,6 +62,10 @@ class ThoughtSegmenter:
     _think_start_pattern = re.compile(r'<think>', re.IGNORECASE)
     _think_end_pattern = re.compile(r'</think>', re.IGNORECASE)
 
+    # Characters to back up when scanning for separators that span chunk
+    # boundaries.  Equal to max(len(p) for p in TARGET_PHRASES) - 1.
+    _SEPARATOR_OVERLAP: int = max(len(p) for p in TARGET_PHRASES) - 1
+
     def __init__(self, tokenizer, min_segment_tokens: int = 15) -> None:
         self._tokenizer = tokenizer
         self._min_segment_tokens = min_segment_tokens
@@ -141,14 +145,37 @@ class ThoughtSegmenter:
     # ------------------------------------------------------------------
 
     def _segment_new_text(self) -> None:
-        """Segment new reasoning content since last call."""
-        new_text = self._reasoning_content[self._processed_char_len:]
-        if not new_text:
+        """Segment new reasoning content since last call.
+
+        To catch separator phrases that span chunk boundaries, the scan
+        backs up ``_SEPARATOR_OVERLAP`` characters into already-processed
+        text.  Thoughts covering that overlap region are trimmed or removed
+        so the overlap can be re-segmented together with the new text.
+        """
+        text = self._reasoning_content
+        if len(text) == self._processed_char_len:
             return
 
-        current_char_offset = self._processed_char_len
+        # Back up to catch separators that span the chunk boundary.
+        overlap = min(self._processed_char_len, self._SEPARATOR_OVERLAP)
+        scan_start = self._processed_char_len - overlap
 
-        parts = self._segmentation_pattern.split(new_text)
+        # Trim / remove thoughts that fall within the overlap region so
+        # the overlap can be re-segmented with the new text.
+        if overlap > 0 and self._thoughts:
+            while self._thoughts and self._thoughts[-1].start_char_pos >= scan_start:
+                self._thoughts.pop()
+            if self._thoughts and self._thoughts[-1].end_char_pos > scan_start:
+                last = self._thoughts[-1]
+                last.text = text[last.start_char_pos:scan_start]
+                last.end_char_pos = scan_start
+                last.start_token_pos = -1
+                last.end_token_pos = -1
+
+        scan_text = text[scan_start:]
+        current_char_offset = scan_start
+
+        parts = self._segmentation_pattern.split(scan_text)
 
         # First part: text before the first separator
         if parts[0]:
@@ -187,7 +214,7 @@ class ThoughtSegmenter:
             current_char_offset = end_char
             i += 2
 
-        self._processed_char_len = len(self._reasoning_content)
+        self._processed_char_len = len(text)
         self._recalculate_token_positions()
 
     # Number of cached tokens to re-tokenize on each update to correct
