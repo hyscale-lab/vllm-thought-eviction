@@ -223,6 +223,13 @@ class SamplingParams(
     performing a deep copy. This should only be set when the params object
     is guaranteed to be dedicated to a single request and won't be modified
     in ways that would affect other uses."""
+    enable_l2_norms: bool = False
+    """Internal flag set by the server when eviction_params are present on the
+    request.  Travels via IPC to the EngineCore worker process so that
+    gpu_model_runner and the scheduler can gate L2 norm computation on a
+    per-request basis.  Defaults to False — standard requests incur zero
+    norm overhead.  Because SamplingParams uses omit_defaults=True, this
+    field is omitted from serialization when False."""
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
