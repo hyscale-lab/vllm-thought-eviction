@@ -110,7 +110,6 @@ class ThoughtMinStrategy:
         self,
         thoughts: list[ThoughtSegment],
         keep_ratio: float,
-        min_segment_tokens: int,
         prune_after_tokens: int,
         protect_first_thought: bool = True,
     ) -> list[tuple[int, int]]:
@@ -119,8 +118,6 @@ class ThoughtMinStrategy:
         Args:
             thoughts: List of ThoughtSegment objects with l2_norms populated.
             keep_ratio: Fraction of eviction candidates to keep (0.0 to 1.0).
-            min_segment_tokens: Minimum tokens required for a thought to be
-                considered a valid eviction candidate.
             prune_after_tokens: Minimum total token count across valid thoughts
                 before eviction begins.
             protect_first_thought: If True, the first valid thought is never
@@ -131,8 +128,7 @@ class ThoughtMinStrategy:
         """
         valid_thoughts = [
             t for t in thoughts
-            if (t.end_token_pos - t.start_token_pos) >= min_segment_tokens
-            and t.l2_norms is not None
+            if t.l2_norms is not None
             and len(t.l2_norms) > 0
         ]
 
@@ -174,7 +170,6 @@ class ThoughtAvgStrategy:
         self,
         thoughts: list[ThoughtSegment],
         keep_ratio: float,
-        min_segment_tokens: int,
         prune_after_tokens: int,
         protect_first_thought: bool = True,
     ) -> list[tuple[int, int]]:
@@ -183,8 +178,6 @@ class ThoughtAvgStrategy:
         Args:
             thoughts: List of ThoughtSegment objects with l2_norms populated.
             keep_ratio: Fraction of eviction candidates to keep (0.0 to 1.0).
-            min_segment_tokens: Minimum tokens required for a thought to be
-                considered a valid eviction candidate.
             prune_after_tokens: Minimum total token count across valid thoughts
                 before eviction begins.
             protect_first_thought: If True, the first valid thought is never
@@ -195,8 +188,7 @@ class ThoughtAvgStrategy:
         """
         valid_thoughts = [
             t for t in thoughts
-            if (t.end_token_pos - t.start_token_pos) >= min_segment_tokens
-            and t.l2_norms is not None
+            if t.l2_norms is not None
             and len(t.l2_norms) > 0
         ]
 
@@ -252,7 +244,6 @@ class RandomStrategy:
         self,
         thoughts: list[ThoughtSegment],
         keep_ratio: float,
-        min_segment_tokens: int,
         prune_after_tokens: int,
         protect_first_thought: bool = True,
     ) -> list[tuple[int, int]]:
@@ -264,8 +255,6 @@ class RandomStrategy:
         Args:
             thoughts: List of ThoughtSegment objects.
             keep_ratio: Fraction of eviction candidates to keep (0.0 to 1.0).
-            min_segment_tokens: Minimum tokens required for a thought to be
-                considered a valid eviction candidate.
             prune_after_tokens: Minimum total token count across valid thoughts
                 before eviction begins.
             protect_first_thought: If True, the first valid thought is never
@@ -274,10 +263,7 @@ class RandomStrategy:
         Returns:
             List of reasoning-relative (start, end) ranges to evict.
         """
-        valid_thoughts = [
-            t for t in thoughts
-            if (t.end_token_pos - t.start_token_pos) >= min_segment_tokens
-        ]
+        valid_thoughts = list(thoughts)
 
         if len(valid_thoughts) < 2:
             return []

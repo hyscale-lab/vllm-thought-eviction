@@ -338,7 +338,6 @@ class EvictionOrchestrator:
                 ranges = self.strategy.compute_evictable_ranges(
                     thoughts,
                     self.params.keep_ratio,
-                    self.params.min_segment_tokens,
                     self.params.prune_after_tokens,
                     self.params.protect_first_thought,
                 )
