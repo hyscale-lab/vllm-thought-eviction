@@ -153,16 +153,13 @@ class TestSegmentReasoningWithTargetPhrases:
             assert it.end_char_pos == st.end_char_pos
 
     def test_short_thoughts_still_created(self, mock_tokenizer):
-        """Thoughts with fewer tokens than min_segment_tokens are still created.
-
-        Filtering is strategy-level responsibility, not segmenter-level.
-        """
-        # Set a high min_segment_tokens to confirm segmenter still creates segments
+        """Sub-threshold thoughts are merged into the next thought by the segmenter."""
+        # Set a high min_segment_tokens to trigger merging
         segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=100)
         reasoning = "Start. But tiny."
         thoughts = segmenter.update(reasoning)
-        # The "But tiny." thought has very few tokens but should still be created
-        assert len(thoughts) == 2
+        # The short first thought ("Start. ") should be merged into "But tiny."
+        assert len(thoughts) == 1
 
     def test_reset_clears_state(self, mock_tokenizer):
         """reset() clears all thoughts and char tracking for a new request."""
@@ -307,3 +304,129 @@ class TestTokenPositionMapping:
         # Modifying the returned list should not affect internal state via reference
         # (the property returns the internal list, so at minimum verify it's the right object)
         assert thoughts is segmenter.thoughts
+
+
+# ---------------------------------------------------------------------------
+# SEG-MERGE: sub-threshold thought merging
+# ---------------------------------------------------------------------------
+
+class TestMergeSubThresholdThoughts:
+    """SEG-MERGE: _merge_sub_threshold_thoughts() merges short thoughts into next."""
+
+    def test_merge_sub_threshold_into_next(self, mock_tokenizer):
+        """Two thoughts where first is short -> merged into one.
+
+        mock_tokenizer uses ~5 chars per token.
+        "Start. " is 7 chars -> 2 tokens (below min_segment_tokens=5 only if
+        we set a threshold above 2). Use min_segment_tokens=5 to trigger merge.
+        Actually "Start. " = 7 chars = ~2 tokens (ceil(7/5)=2).
+        "But second thought content here." = 32 chars = ~7 tokens.
+        First thought (2 tokens) < threshold (5) -> merges into second.
+        """
+        # "Ab. " = 4 chars = 1 token (below min=5), "But rest rest rest rest rest." = 29 chars = 6 tokens
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=5)
+        reasoning = "Ab. But rest rest rest rest rest."
+        thoughts = segmenter.update(reasoning)
+
+        assert len(thoughts) == 1, (
+            f"Expected 1 merged thought, got {len(thoughts)}: {[t.text for t in thoughts]}"
+        )
+        assert "Ab." in thoughts[0].text
+        assert "But" in thoughts[0].text
+
+    def test_merge_chain_sub_threshold(self, mock_tokenizer):
+        """Three consecutive short thoughts all merge into the last one.
+
+        Each short thought (< min_segment_tokens) merges into the next
+        via greedy accumulate: first into second, then combined first+second
+        into third if combined is still short, otherwise second alone into third.
+
+        Since merging is greedy left-to-right:
+        - After first+second merge, the merged thought may itself be below threshold
+          so it absorbs the third as well.
+        Use 4-char thoughts at 5 chars/token -> 1 token each, min=5.
+        The third thought is longer to act as the absorber.
+        """
+        # "Ab. " (4 chars, 1 tok) + "But x" (5 chars, 1 tok) + "Wait x x x x x x x." (20 chars, 4 toks)
+        # After merge: "Ab. But x" (9 chars, 2 toks) still < 5 -> merges into "Wait..."
+        # Result: 1 thought
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=5)
+        reasoning = "Ab. But x. Wait x x x x x x x."
+        thoughts = segmenter.update(reasoning)
+
+        assert len(thoughts) == 1, (
+            f"Expected 1 merged thought, got {len(thoughts)}: {[t.text for t in thoughts]}"
+        )
+        assert "Ab." in thoughts[0].text
+        assert "But" in thoughts[0].text
+        assert "Wait" in thoughts[0].text
+
+    def test_merge_preserves_above_threshold(self, mock_tokenizer):
+        """Thoughts already above threshold produce no merging.
+
+        Each thought should have >= min_segment_tokens tokens to avoid merging.
+        mock_tokenizer: 5 chars per token.
+        min_segment_tokens=2: each thought needs >= 2 tokens (>= 10 chars).
+        """
+        # "First thought content here. " = 28 chars = 6 tokens (above 2)
+        # "But second thought content here. " = 33 chars = 7 tokens (above 2)
+        # "Wait third thought content." = 27 chars = 6 tokens (above 2)
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=2)
+        reasoning = (
+            "First thought content here. "
+            "But second thought content here. "
+            "Wait third thought content."
+        )
+        thoughts = segmenter.update(reasoning)
+
+        assert len(thoughts) == 3, (
+            f"Expected 3 thoughts (no merging), got {len(thoughts)}: {[t.text for t in thoughts]}"
+        )
+
+    def test_merge_final_thought_exempt(self, mock_tokenizer):
+        """Last thought below threshold is kept as-is (D-02 final thought exemption).
+
+        Three thoughts: first above threshold, second above threshold, third below.
+        The third (final) thought should NOT be merged or dropped.
+        """
+        # "First thought content here. " = 28 chars = 6 tokens (above min=5)
+        # "But second thought content." = 27 chars = 6 tokens (above min=5)
+        # "Now x." = 6 chars = 2 tokens (below min=5, but it's the final thought)
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=5)
+        reasoning = "First thought content here. But second thought content. Now x."
+        thoughts = segmenter.update(reasoning)
+
+        assert len(thoughts) == 3, (
+            f"Expected 3 thoughts (final exempt), got {len(thoughts)}: {[t.text for t in thoughts]}"
+        )
+        assert thoughts[-1].text.startswith("Now")
+
+    def test_merge_disabled_when_zero(self, mock_tokenizer):
+        """min_segment_tokens=0 -> no merging occurs.
+
+        Segmenter should produce same number of thoughts as without merge logic.
+        """
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
+        # "Ab. " = 4 chars = 1 token (would merge if min_segment_tokens > 0)
+        reasoning = "Ab. But rest rest rest rest rest."
+        thoughts = segmenter.update(reasoning)
+
+        # With min_segment_tokens=0, no merging -> 2 thoughts
+        assert len(thoughts) == 2, (
+            f"Expected 2 thoughts with no merging, got {len(thoughts)}: {[t.text for t in thoughts]}"
+        )
+
+    def test_merge_single_thought_below_threshold(self, mock_tokenizer):
+        """Single thought below threshold is emitted as-is (final thought exemption).
+
+        If there is only one thought and it is below min_segment_tokens,
+        it must still be returned (it is the final thought, D-02).
+        """
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=100)
+        reasoning = "Hi."  # Very short, 1 token
+        thoughts = segmenter.update(reasoning)
+
+        assert len(thoughts) == 1, (
+            f"Expected 1 thought (single thought exempt), got {len(thoughts)}"
+        )
+        assert "Hi." in thoughts[0].text
