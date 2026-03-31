@@ -190,7 +190,6 @@ def test_thought_min_strategy_sorts_by_min_norm():
     ranges = strategy.compute_evictable_ranges(
         thoughts=[t0, t1, t2, t3],
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=True,
     )
@@ -204,16 +203,15 @@ def test_thought_min_strategy_sorts_by_min_norm():
 
 
 def test_thought_min_strategy_too_few_valid_thoughts():
-    """Test 5: fewer than 2 valid thoughts returns []."""
+    """Test 5: fewer than 2 thoughts with l2_norms returns []."""
     strategy = ThoughtMinStrategy()
     t0 = make_thought("t0", 0, 50, 0, 20, min_norm=0.1, l2_norms=np.full(20, 0.1))
-    # t1 too small (only 3 tokens, below min_segment_tokens=5)
-    t1 = make_thought("t1", 50, 70, 20, 23, min_norm=0.5, l2_norms=np.full(3, 0.5))
+    # t1 has no l2_norms — not a valid eviction candidate
+    t1 = make_thought_no_l2("t1", 50, 70, 20, 23)
 
     ranges = strategy.compute_evictable_ranges(
         thoughts=[t0, t1],
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
     )
     assert ranges == []
@@ -228,7 +226,6 @@ def test_thought_min_strategy_below_prune_threshold():
     ranges = strategy.compute_evictable_ranges(
         thoughts=[t0, t1],
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1000,  # far above total tokens
     )
     assert ranges == []
@@ -243,7 +240,6 @@ def test_thought_min_strategy_ranges_are_reasoning_relative():
     ranges = strategy.compute_evictable_ranges(
         thoughts=[t0, t1],
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=True,
     )
@@ -254,7 +250,6 @@ def test_thought_min_strategy_ranges_are_reasoning_relative():
     ranges2 = strategy.compute_evictable_ranges(
         thoughts=[t0, t1],
         keep_ratio=0.0,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=False,
     )
@@ -290,7 +285,6 @@ def test_thought_avg_strategy_sorts_by_avg_norm():
     ranges = strategy.compute_evictable_ranges(
         thoughts=[t0, t1, t2, t3],
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=True,
     )
@@ -316,7 +310,6 @@ def test_thought_avg_strategy_uses_avg_not_min():
     ranges = strategy.compute_evictable_ranges(
         thoughts=[t0, t1, t2],
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=True,
     )
@@ -348,7 +341,6 @@ def test_random_strategy_stable_scores():
     ranges1 = strategy.compute_evictable_ranges(
         thoughts=thoughts,
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=True,
     )
@@ -360,7 +352,6 @@ def test_random_strategy_stable_scores():
     ranges2 = strategy.compute_evictable_ranges(
         thoughts=thoughts,
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=True,
     )
@@ -381,7 +372,6 @@ def test_random_scores_keyed_on_start_char_pos():
     strategy.compute_evictable_ranges(
         thoughts=thoughts,
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=True,
     )
@@ -412,7 +402,6 @@ def test_random_strategy_different_seed_different_selection():
         ranges = s.compute_evictable_ranges(
             thoughts=thoughts,
             keep_ratio=0.5,
-            min_segment_tokens=5,
             prune_after_tokens=1,
         )
         results.add(tuple(sorted(ranges)))
@@ -437,7 +426,6 @@ def test_random_strategy_protect_first_thought():
         ranges = strategy.compute_evictable_ranges(
             thoughts=thoughts,
             keep_ratio=0.5,
-            min_segment_tokens=5,
             prune_after_tokens=1,
             protect_first_thought=True,
         )
@@ -458,7 +446,6 @@ def test_random_strategy_reset_scores():
     strategy.compute_evictable_ranges(
         thoughts=thoughts,
         keep_ratio=0.5,
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=True,
     )
@@ -482,7 +469,6 @@ def test_thought_min_strategy_ranges_match_token_positions():
     ranges = strategy.compute_evictable_ranges(
         thoughts=[t0, t1],
         keep_ratio=0.0,  # evict everything
-        min_segment_tokens=5,
         prune_after_tokens=1,
         protect_first_thought=False,
     )
