@@ -47,9 +47,9 @@ class ThoughtSegmenter:
     Args:
         tokenizer: A callable tokenizer supporting return_offsets_mapping=True.
             Must be passed as a pre-loaded instance (never loads from disk).
-        min_segment_tokens: Minimum tokens for a thought segment. Filtering at
-            this threshold is the caller's responsibility; the segmenter still
-            creates the segment. Default 15.
+        min_segment_tokens: Minimum tokens for a thought segment. Sub-threshold
+            thoughts are merged into the next thought via greedy accumulate.
+            The final thought is exempt from this threshold. Default 15.
     """
 
     TARGET_PHRASES = [
@@ -216,6 +216,7 @@ class ThoughtSegmenter:
 
         self._processed_char_len = len(text)
         self._recalculate_token_positions()
+        self._merge_sub_threshold_thoughts()
 
     # Number of cached tokens to re-tokenize on each update to correct
     # BPE boundary effects.  The last few tokens of a prefix encoding can
@@ -291,3 +292,27 @@ class ThoughtSegmenter:
 
             thought.start_token_pos = token_start
             thought.end_token_pos = max(token_start, token_end)
+
+    def _merge_sub_threshold_thoughts(self) -> None:
+        """Merge consecutive thoughts where the earlier one is below min threshold.
+
+        Runs after _recalculate_token_positions() so token counts are valid.
+        The final thought is always kept regardless of token count (D-02).
+        When min_segment_tokens <= 0, no merging occurs.
+        """
+        if self._min_segment_tokens <= 0 or len(self._thoughts) < 2:
+            return
+
+        merged: list[ThoughtSegment] = []
+        for thought in self._thoughts:
+            if (merged
+                    and (merged[-1].end_token_pos - merged[-1].start_token_pos)
+                        < self._min_segment_tokens):
+                # Extend previous thought to absorb this one
+                prev = merged[-1]
+                prev.text += thought.text
+                prev.end_char_pos = thought.end_char_pos
+                prev.end_token_pos = thought.end_token_pos
+            else:
+                merged.append(thought)
+        self._thoughts = merged

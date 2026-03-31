@@ -85,7 +85,8 @@ class TestSegmentReasoningWithTargetPhrases:
 
     def test_segment_reasoning_with_target_phrases(self, mock_tokenizer):
         """update() with 'But' and 'Wait' produces 3 thoughts."""
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates segmentation
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         reasoning = "First thought content. But second thought. Wait third thought."
         thoughts = segmenter.update(reasoning)
 
@@ -96,7 +97,8 @@ class TestSegmentReasoningWithTargetPhrases:
 
     def test_incremental_update_appends_to_last_thought(self, mock_tokenizer):
         """update() called incrementally appends to existing last thought."""
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates segmentation
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
 
         # First call: only first half
         first_half = "First thought content part one"
@@ -130,14 +132,15 @@ class TestSegmentReasoningWithTargetPhrases:
         #   chunk 1 ends at 29 → "...here. B" (splits "But")
         #   chunk 2 ends at 60 → "...longer. P" (splits "Perhaps")
         #   chunk 3 ends at 92 → "...it. Oh w" (splits "Oh wait")
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates chunk boundary detection
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         segmenter.update(full_text[:29])
         segmenter.update(full_text[:60])
         segmenter.update(full_text[:92])
         thoughts = segmenter.update(full_text)
 
         # Single-shot for comparison
-        single = ThoughtSegmenter(mock_tokenizer)
+        single = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         single_thoughts = single.update(full_text)
 
         assert len(thoughts) == len(single_thoughts), (
@@ -163,7 +166,8 @@ class TestSegmentReasoningWithTargetPhrases:
 
     def test_reset_clears_state(self, mock_tokenizer):
         """reset() clears all thoughts and char tracking for a new request."""
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates reset behavior
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         segmenter.update("Some text. But more.")
         assert len(segmenter.thoughts) == 2
 
@@ -184,7 +188,8 @@ class TestTokenPositionMapping:
 
     def test_token_positions_set_after_update(self, mock_tokenizer):
         """Token positions are non-negative after update() is called."""
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates token position mapping
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         thoughts = segmenter.update("Hello world. But another thought here.")
 
         for thought in thoughts:
@@ -193,7 +198,8 @@ class TestTokenPositionMapping:
 
     def test_token_positions_are_reasoning_relative(self, mock_tokenizer):
         """Token positions start from 0 (reasoning-relative), not absolute sequence positions."""
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates token position mapping
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         thoughts = segmenter.update("First thought starts here. But second thought.")
 
         # The first thought should start at token 0 (reasoning-relative)
@@ -203,7 +209,8 @@ class TestTokenPositionMapping:
 
     def test_token_positions_via_offset_mapping(self, mock_tokenizer):
         """Token positions are computed via tokenizer returning known offset_mapping."""
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates offset_mapping usage
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         # "01234" = 1 token (chars 0-5), "But x" = boundary at char 5
         reasoning = "01234But rest here."
         thoughts = segmenter.update(reasoning)
@@ -233,14 +240,15 @@ class TestTokenPositionMapping:
         )
 
         # Chunks land mid-thought, never bisecting a separator word.
+        # min_segment_tokens=0 disables merge so this test isolates tokenization caching.
         # --- Incremental: feed text in 3 growing chunks ---
-        inc = ThoughtSegmenter(mock_tokenizer)
+        inc = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         inc.update(full_text[:35])   # mid "second"
         inc.update(full_text[:70])   # mid "arrives"
         inc_thoughts = inc.update(full_text)  # full text
 
         # --- Single-shot: feed full text at once ---
-        single = ThoughtSegmenter(mock_tokenizer)
+        single = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         single_thoughts = single.update(full_text)
 
         assert len(inc_thoughts) == len(single_thoughts), (
@@ -275,7 +283,8 @@ class TestTokenPositionMapping:
         subsequent update() calls back up _OVERLAP_TOKENS tokens and
         re-tokenize from that point forward — not the entire text.
         """
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates retokenization behavior
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         text_v1 = "First thought here. "  # 20 chars → 4 tokens at 5 chars each
         text_v2 = text_v1 + "But second thought."
 
@@ -297,7 +306,8 @@ class TestTokenPositionMapping:
 
     def test_thoughts_property_is_readonly_view(self, mock_tokenizer):
         """thoughts property returns current list without allowing internal mutation."""
-        segmenter = ThoughtSegmenter(mock_tokenizer)
+        # min_segment_tokens=0 disables merge so this test isolates the property
+        segmenter = ThoughtSegmenter(mock_tokenizer, min_segment_tokens=0)
         segmenter.update("Some text. But more text here.")
         thoughts = segmenter.thoughts
         assert len(thoughts) == 2
