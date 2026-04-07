@@ -1247,10 +1247,11 @@ class GPUModelRunner(
             return
         
         # Phase 6: Build per-request filter from IPC flag that traveled from API server.
-        eviction_req_ids = {
-            req_id for req_id, rs in self.requests.items()
-            if rs.sampling_params is not None and rs.sampling_params.enable_l2_norms
-        }
+        eviction_req_ids = set()
+        for req_id, rs in self.requests.items():
+            if rs.sampling_params is not None and rs.sampling_params.enable_l2_norms:
+                eviction_req_ids.add(req_id)
+                self.l2_norm_cache.set_request_layers(req_id, rs.sampling_params.l2_norm_layers)
         self.l2_norm_cache.update_norms_batch(
             request_ids=list(self.requests.keys()),
             key_cache=layers_to_compute,
