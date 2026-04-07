@@ -69,22 +69,19 @@ class GlobalStrategy:
         self,
         l2_norms: np.ndarray,
         keep_ratio: float,
-        prune_after_tokens: int,
     ) -> list[tuple[int, int]]:
         """Compute evictable token ranges using global L2 norm ranking.
+
+        The orchestrator enforces the prune_after_tokens minimum before
+        calling this method, so no token-count guard is needed here.
 
         Args:
             l2_norms: Array of L2 norms for all reasoning tokens.
             keep_ratio: Fraction of tokens to keep (0.0 to 1.0).
-            prune_after_tokens: Minimum token count before eviction begins.
 
         Returns:
             List of reasoning-relative (start, end) ranges to evict.
-            Empty list if not enough tokens or keep_ratio is 1.0.
         """
-        if len(l2_norms) < prune_after_tokens:
-            return []
-
         num_tokens = len(l2_norms)
         tokens_to_keep = int(keep_ratio * num_tokens)
 
