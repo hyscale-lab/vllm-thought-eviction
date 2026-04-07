@@ -290,8 +290,10 @@ class EvictionOrchestrator:
         """
         try:
             # Guard 1 (ENG-09): minimum token threshold
-            if len(self.accumulated_l2_norms) < self.params.prune_after_tokens:
-                return
+            # Random strategy selects thoughts without L2 norms — skip norm-count guard.
+            if self.params.strategy != "random":
+                if len(self.accumulated_l2_norms) < self.params.prune_after_tokens:
+                    return
 
             # Guard 2 (ENG-10): delay intervals
             if self.cycle_count < self.params.eviction_delay_intervals:
