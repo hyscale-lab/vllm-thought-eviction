@@ -90,41 +90,41 @@
 | CLEAN-01 | Phase 1 | Pending |
 | CLEAN-02 | Phase 1 | Pending |
 | CLEAN-03 | Phase 1 | Pending |
-| AUDIT-01 | Phase 2 | Pending |
-| AUDIT-02 | Phase 2 | Pending |
-| AUDIT-03 | Phase 2 | Pending |
-| AUDIT-04 | Phase 2 | Pending |
-| AUDIT-05 | Phase 2 | Pending |
-| MERGE-01 | Phase 3 | Pending |
-| MERGE-02 | Phase 3 | Pending |
-| MERGE-03 | Phase 3 | Pending |
-| MERGE-04 | Phase 3 | Pending |
-| MERGE-05 | Phase 3 | Pending |
-| MERGE-06 | Phase 3 | Pending |
-| MERGE-07 | Phase 3 | Pending |
-| MERGE-08 | Phase 3 | Pending |
-| IPC-01 | Phase 4 | Pending |
-| IPC-02 | Phase 4 | Pending |
-| IPC-03 | Phase 4 | Pending |
-| IPC-04 | Phase 4 | Pending |
-| IPC-05 | Phase 4 | Pending |
-| SCHED-01 | Phase 5 | Pending |
-| SCHED-02 | Phase 5 | Pending |
-| SCHED-03 | Phase 5 | Pending |
-| SCHED-04 | Phase 5 | Pending |
-| SCHED-05 | Phase 5 | Pending |
-| SCHED-06 | Phase 5 | Pending |
-| GPU-01 | Phase 6 | Pending |
-| GPU-02 | Phase 6 | Pending |
-| GPU-03 | Phase 6 | Pending |
-| GPU-04 | Phase 6 | Pending |
-| GPU-05 | Phase 6 | Pending |
-| SERVE-01 | Phase 7 | Pending |
-| SERVE-02 | Phase 7 | Pending |
-| SERVE-03 | Phase 7 | Pending |
-| SERVE-04 | Phase 7 | Pending |
-| SERVE-05 | Phase 7 | Pending |
-| SERVE-06 | Phase 7 | Pending |
+| AUDIT-01 | Phase 1 | Pending |
+| AUDIT-02 | Phase 1 | Pending |
+| AUDIT-03 | Phase 1 | Pending |
+| AUDIT-04 | Phase 1 | Pending |
+| AUDIT-05 | Phase 1 | Pending |
+| MERGE-01 | Phase 2 | Pending |
+| MERGE-02 | Phase 2 | Pending |
+| MERGE-03 | Phase 2 | Pending |
+| MERGE-04 | Phase 2 | Pending |
+| MERGE-05 | Phase 2 | Pending |
+| MERGE-06 | Phase 2 | Pending |
+| MERGE-07 | Phase 2 | Pending |
+| MERGE-08 | Phase 2 | Pending |
+| IPC-01 | Phase 2 | Pending |
+| IPC-02 | Phase 2 | Pending |
+| IPC-03 | Phase 2 | Pending |
+| IPC-04 | Phase 2 | Pending |
+| IPC-05 | Phase 2 | Pending |
+| SCHED-01 | Phase 3 | Pending |
+| SCHED-02 | Phase 3 | Pending |
+| SCHED-03 | Phase 3 | Pending |
+| SCHED-04 | Phase 3 | Pending |
+| SCHED-05 | Phase 3 | Pending |
+| SCHED-06 | Phase 3 | Pending |
+| GPU-01 | Phase 3 | Pending |
+| GPU-02 | Phase 3 | Pending |
+| GPU-03 | Phase 3 | Pending |
+| GPU-04 | Phase 3 | Pending |
+| GPU-05 | Phase 3 | Pending |
+| SERVE-01 | Phase 4 | Pending |
+| SERVE-02 | Phase 4 | Pending |
+| SERVE-03 | Phase 4 | Pending |
+| SERVE-04 | Phase 4 | Pending |
+| SERVE-05 | Phase 4 | Pending |
+| SERVE-06 | Phase 4 | Pending |
 
 **Coverage:**
 - v1 requirements: 36 total
@@ -133,4 +133,4 @@
 
 ---
 *Requirements defined: 2026-04-07*
-*Last updated: 2026-04-07 after initial definition*
+*Last updated: 2026-04-07 — traceability updated to reflect 4-phase coarse consolidation*
