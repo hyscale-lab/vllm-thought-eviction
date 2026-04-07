@@ -124,10 +124,6 @@ class EvictionOrchestrator:
         self._eviction_events: list[dict] = []
         self._start_time: float = time.monotonic()
 
-        # D-03: register per-request layer prefs with L2NormCache before streaming begins
-        _l2_cache = get_l2_norm_cache()
-        _l2_cache.set_request_layers(self.request_id, eviction_params.l2_norm_layers)
-
     async def wrap_stream(
         self,
         result_generator: AsyncIterator[RequestOutput],
@@ -316,7 +312,7 @@ class EvictionOrchestrator:
             thoughts = self.segmenter.update(self.reasoning_content)
 
             # Assign L2 norms to thoughts (ENG-02)
-            l2_array = np.array(self.accumulated_l2_norms, dtype=np.float32)
+            l2_array = np.array(self.accumulated_l2_norms[self.reasoning_start_token_offset:], dtype=np.float32)
             for thought in thoughts:
                 start = thought.start_token_pos
                 end = thought.end_token_pos
@@ -354,7 +350,7 @@ class EvictionOrchestrator:
             # Apply retention window (ENG-05): protect the last N reasoning tokens
             # Only apply when retention_window_tokens > 0 AND enough tokens exist.
             # When retention_floor would be 0, all ranges would be discarded — skip.
-            total_reasoning_tokens = len(self.accumulated_l2_norms)
+            total_reasoning_tokens = len(l2_array)
             retention_window = self.params.retention_window_tokens
             if retention_window > 0 and total_reasoning_tokens > retention_window:
                 retention_floor = total_reasoning_tokens - retention_window
