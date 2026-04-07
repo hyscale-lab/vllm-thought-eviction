@@ -230,6 +230,11 @@ class SamplingParams(
     per-request basis.  Defaults to False — standard requests incur zero
     norm overhead.  Because SamplingParams uses omit_defaults=True, this
     field is omitted from serialization when False."""
+    l2_norm_layers: list[int] | None = None
+    """Per-request layer indices for L2 norm computation. Travels via IPC
+    to the EngineCore worker process so that gpu_model_runner can filter
+    which layers contribute to the per-token norm. None means use all
+    layers (or the global filter if set). Defaults to None."""
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.

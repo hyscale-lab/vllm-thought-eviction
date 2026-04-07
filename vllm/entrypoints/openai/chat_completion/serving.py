@@ -393,6 +393,7 @@ class OpenAIServingChat(OpenAIServing):
                     if (request.eviction_params is not None
                             and request.eviction_params.strategy != "random"):
                         sampling_params.enable_l2_norms = True
+                        sampling_params.l2_norm_layers = request.eviction_params.l2_norm_layers
 
                 self._log_inputs(
                     sub_request_id,
