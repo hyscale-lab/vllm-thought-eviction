@@ -61,11 +61,11 @@ Plans:
   3. Pattern B files (4) contain pure upstream code (eviction deferred to Phase 3/4)
   4. msgspec field ordering is correct: eviction fields last in `EngineCoreOutput`, `SchedulerOutput`, `SamplingParams`
   5. All auto-merged files preserve eviction code (protocol, output_processor, outputs, worker_base, kv_cache classes)
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 02.1-01-PLAN.md -- Execute upstream merge, resolve 14 conflicts (Pattern A + B), commit merge
-- [ ] 02.1-02-PLAN.md -- Verify auto-merged files and validate msgspec field ordering
+- [x] 02.1-02-PLAN.md -- Verify auto-merged files and validate msgspec field ordering
 
 ### Phase 3: Core Adaptation
 **Goal**: Verify that the scheduler and GPU model runner correctly execute thought eviction logic after the Phase 2.1 upstream merge — all eviction modules import cleanly, unit tests pass, and key classes instantiate without error
@@ -100,6 +100,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 |-------|----------------|--------|-----------|
 | 1. Groundwork & Audit | 3/3 | Complete | - |
 | 2. Safe Additions | 2/2 | Complete | - |
-| 02.1 Upstream Merge | 1/2 | In Progress|  |
+| 02.1 Upstream Merge | 2/2 | Complete   | 2026-04-08 |
 | 3. Core Adaptation | 0/TBD | Not started | - |
 | 4. Serving & Validation | 0/TBD | Not started | - |

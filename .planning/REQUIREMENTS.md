@@ -43,8 +43,8 @@
 - [x] **UPSTREAM-01**: Execute `git merge upstream/main` and resolve all 14 conflicting files
 - [x] **UPSTREAM-02**: Resolve Pattern A files (10) by accepting upstream + re-appending eviction additions
 - [x] **UPSTREAM-03**: Resolve Pattern B files (4) by accepting upstream wholesale (eviction deferred to Phase 3/4)
-- [ ] **UPSTREAM-04**: Verify all 7 auto-merged files preserve eviction code correctly
-- [ ] **UPSTREAM-05**: Validate msgspec field ordering (eviction fields last) in EngineCoreOutput, SchedulerOutput, SamplingParams
+- [x] **UPSTREAM-04**: Verify all 7 auto-merged files preserve eviction code correctly
+- [x] **UPSTREAM-05**: Validate msgspec field ordering (eviction fields last) in EngineCoreOutput, SchedulerOutput, SamplingParams
 
 ### Scheduler Adaptation
 
@@ -119,8 +119,8 @@
 | UPSTREAM-01 | Phase 02.1 | Complete |
 | UPSTREAM-02 | Phase 02.1 | Complete |
 | UPSTREAM-03 | Phase 02.1 | Complete |
-| UPSTREAM-04 | Phase 02.1 | Pending |
-| UPSTREAM-05 | Phase 02.1 | Pending |
+| UPSTREAM-04 | Phase 02.1 | Complete |
+| UPSTREAM-05 | Phase 02.1 | Complete |
 | SCHED-01 | Phase 3 | Pending |
 | SCHED-02 | Phase 3 | Pending |
 | SCHED-03 | Phase 3 | Pending |
