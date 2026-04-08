@@ -825,7 +825,6 @@ class EngineCore:
             logger.error("Could not configure L2 norms: %s", e)
             return {"error": str(e)}
 
-
 class EngineShutdownState(IntEnum):
     RUNNING = 0
     REQUESTED = 1

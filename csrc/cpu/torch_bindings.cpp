@@ -4,7 +4,9 @@
 
 #include <torch/library.h>
 
-std::string init_cpu_threads_env(const std::string& cpu_ids);
+// Note: overwrite the external definition for sharing same name between
+// libraries use different ISAs.
+#define TORCH_EXTENSION_NAME _C
 
 void release_dnnl_matmul_handler(int64_t handler);
 
@@ -19,13 +21,14 @@ void onednn_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
                       const std::optional<torch::Tensor>& azp,
                       const std::optional<torch::Tensor>& azp_adj,
                       const std::optional<torch::Tensor>& bias,
-                      int64_t handler);
+                      const torch::Tensor& handler_tensor);
 
 int64_t create_onednn_mm_handler(const torch::Tensor& b,
                                  int64_t primitive_cache_size);
 
 void onednn_mm(torch::Tensor& c, const torch::Tensor& a,
-               const std::optional<torch::Tensor>& bias, int64_t handler);
+               const std::optional<torch::Tensor>& bias,
+               const torch::Tensor& handler_tensor);
 
 bool is_onednn_acl_supported();
 
@@ -34,7 +37,7 @@ void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens);
 
 int64_t init_shm_manager(const std::string& name, const int64_t group_size,
-                         const int64_t rank);
+                         const int64_t rank, const int64_t thread_num);
 
 std::string join_shm_manager(int64_t handle, const std::string& name);
 
@@ -73,6 +76,14 @@ at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      at::Tensor& scales2,
                                      const std::optional<at::Tensor>& bias,
                                      at::ScalarType out_dtype, bool is_vnni);
+
+// Adapted from sglang: INT4 W4A8 kernels
+std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
+    at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
+
+at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
+                              at::Tensor& w_scales,
+                              std::optional<at::Tensor> bias);
 
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
@@ -118,8 +129,14 @@ void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
                    const std::optional<torch::Tensor>& w13_bias,
                    const std::optional<torch::Tensor>& w2_bias,
                    const torch::Tensor& topk_weights,
-                   const torch::Tensor& topk_id, const std::string& act,
-                   const std::string& isa);
+                   const torch::Tensor& topk_id, const bool skip_weighted,
+                   const std::string& act, const std::string& isa);
+
+void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
+                                      const torch::Tensor positions,
+                                      const torch::Tensor block_table,
+                                      torch::Tensor slot_mapping,
+                                      const int64_t block_size);
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -196,7 +213,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN GEMM
   ops.def(
       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
-      "int handler) -> ()");
+      "Tensor handler_tensor) -> ()");
   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
 
   // Check if oneDNN was built with ACL backend
@@ -212,7 +229,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN scaled_mm for W8A8 with static per-tensor activation quantization
   ops.def(
       "onednn_scaled_mm(Tensor! c, Tensor a, Tensor a_scales, Tensor? azp, "
-      "Tensor? azp_adj, Tensor? bias, int handler) -> ()");
+      "Tensor? azp_adj, Tensor? bias, Tensor handler_tensor) -> ()");
   ops.impl("onednn_scaled_mm", torch::kCPU, &onednn_scaled_mm);
 
   // Compute int8 quantized tensor for given scaling factor.
@@ -230,9 +247,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
 // SHM CCL
-#ifdef __AVX512F__
-  ops.def("init_shm_manager(str name, int group_size, int rank) -> int",
-          &init_shm_manager);
+#if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__))
+  ops.def(
+      "init_shm_manager(str name, int group_size, int rank, int thread_num) -> "
+      "int",
+      &init_shm_manager);
   ops.def("join_shm_manager(int handle, str name) -> str", &join_shm_manager);
   ops.def("shm_allreduce(int handle, Tensor! data) -> ()");
   ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
@@ -250,7 +269,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("shm_send_tensor_list", torch::kCPU, &shm_send_tensor_list);
   ops.def("shm_recv_tensor_list(int handle, int src) -> Tensor[](a)",
           &shm_recv_tensor_list);
-#endif
+#endif  // #if defined(__AVX512F__) || defined(__aarch64__)
 
   // sgl-kernels
 #if defined(__AVX512BF16__) && defined(__AVX512F__) && defined(__AVX512VNNI__)
@@ -272,6 +291,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? bias, ScalarType out_dtype, bool is_vnni) -> Tensor");
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
            &int8_scaled_mm_with_quant);
+
+  // Adapted from sglang: INT4 W4A8 kernels
+  ops.def(
+      "convert_weight_packed_scale_zp(Tensor qweight, Tensor qzeros, "
+      "Tensor scales) -> (Tensor, Tensor, Tensor)");
+  ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
+           &convert_weight_packed_scale_zp);
+
+  ops.def(
+      "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
+      "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
+  ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
 #endif
 
   // CPU attention kernels
@@ -291,7 +322,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor sheduler_metadata, Tensor? s_aux) -> ()",
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
 
   // placeholders
@@ -317,22 +348,21 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
       "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
+      "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
 #endif
-}
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
-  // CPU utils
-  utils.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
-}
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cpu), cpu_ops) {
-  cpu_ops.def(
+  ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"
       "   float scale, Tensor block_tables, Tensor seq_lens) -> ()");
-  cpu_ops.impl("mla_decode_kvcache", torch::kCPU, &mla_decode_kvcache);
+  ops.impl("mla_decode_kvcache", torch::kCPU, &mla_decode_kvcache);
+
+  ops.def(
+      "compute_slot_mapping_kernel_impl(Tensor query_start_loc, Tensor "
+      "positions, Tensor block_table, Tensor(a3!) slot_mapping, SymInt "
+      "block_size) -> ()",
+      &compute_slot_mapping_kernel_impl);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
