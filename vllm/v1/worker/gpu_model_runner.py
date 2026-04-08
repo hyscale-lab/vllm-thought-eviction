@@ -681,17 +681,19 @@ class GPUModelRunner(
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
         self.layerwise_nvtx_hooks_registered = False
-        
+
+        # Thought eviction state
         self.l2_norm_cache = get_l2_norm_cache()
-        
+
         strategy_map = {
             "sink": self._replace_kv_caches_sink,
             "zero": self._replace_kv_caches_zero,
-            "nearby": self._replace_kv_caches_nearby
+            "nearby": self._replace_kv_caches_nearby,
         }
+        self.replace_func = strategy_map.get(
+            envs.VLLM_KV_REPLACEMENT_STRATEGY, None
+        )
 
-        self.replace_func = strategy_map.get(envs.VLLM_KV_REPLACEMENT_STRATEGY, None)
-        
         # To remember evicted ranges within the block
         self.evicted_ranges: dict[str, list[int]] = {}
 
@@ -1086,75 +1088,61 @@ class GPUModelRunner(
         # This ensures that the model does not attend to the freed blocks.
         evicted_ranges = scheduler_output.evictable_token_ranges_map
         if evicted_ranges:
-            for group_id, block_table_obj in enumerate(self.input_batch.block_table.block_tables):
-                block_size = block_table_obj.block_size
-                bt_np = block_table_obj.block_table.np
+            block_table_obj = self.input_batch.block_table[0]  # Group 0 only (D-06)
+            block_size = block_table_obj.block_size
+            bt_np = block_table_obj.block_table.np
 
-                for req_id, ranges in evicted_ranges.items():
-                    req_index = self.input_batch.req_id_to_index.get(req_id)
-                    if req_index is not None:
-                        # Update CachedRequestState to reflect eviction
-                        # This prevents stale (freed) block IDs from being re-added to the
-                        # input batch if the request is preempted or re-scheduled.
-                        if req_id in self.requests:
-                            req_state = self.requests[req_id]
-                            if group_id < len(req_state.block_ids):
-                                block_ids_list = req_state.block_ids[group_id]
-                                for start, end in ranges:
-                                    start_block = (start + block_size - 1) // block_size
-                                    end_block = end // block_size
-                                    
-                                    # Mark as evicted in the Python list
-                                    for block_idx in range(start_block, end_block):
-                                        if block_idx < len(block_ids_list):
-                                            block_ids_list[block_idx] = 0
+            for req_id, ranges in evicted_ranges.items():
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    # Update CachedRequestState to reflect eviction
+                    if req_id in self.requests:
+                        req_state = self.requests[req_id]
+                        if len(req_state.block_ids) > 0:
+                            block_ids_list = req_state.block_ids[0]
+                            for start, end in ranges:
+                                start_block = (start + block_size - 1) // block_size
+                                end_block = end // block_size
+                                for block_idx in range(start_block, end_block):
+                                    if block_idx < len(block_ids_list):
+                                        block_ids_list[block_idx] = 0
 
-                        # Update the active block table (numpy)
-                        # We use 0 instead of -1 because FlashAttention kernels may crash
-                        # if they encounter -1 in the block table (Illegal Memory Access).
-                        # We rely on the attention mask (updated via update_request_mask)
-                        # to prevent the model from attending to this garbage block.
-                        for start, end in ranges:
-                            start_block = (start + block_size - 1) // block_size
-                            end_block = end // block_size
-                            
-                            # Fill fragmented memory with first token
-                            # Acts as an attention sink
-                            # Check if eviction operation is done previously
-                            if self.replace_func:
-                                if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []):
-                                    sink_block_id = bt_np[req_index, 0]
-                                    if start % block_size != 0:
-                                        self.replace_func(sink_block_id, 
-                                                                start_block-1, 
-                                                                list(range(start%block_size, block_size)),
-                                                                (start%block_size)-1,
-                                                                )
-                                    
-                                    if end % block_size != 0:
-                                        self.replace_func(sink_block_id, 
-                                                                end_block, 
-                                                                list(range(0, end % block_size)),
-                                                                end % block_size,
-                                                                )
-                                    
-                                    self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
-                                    
-                                elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []):
-                                    sink_block_id = bt_np[req_index, 0]
-                                    self.replace_func(sink_block_id, 
-                                                    start_block-1, 
-                                                    list(range(start%block_size, end % block_size)),
-                                                    max((start%block_size)-1, 0),
-                                                    )
-                                    
-                                    self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block,]
-                                
-                            if start_block < end_block:
-                                bt_np[req_index, start_block:end_block] = 0
-                            
- 
-    
+                    # Apply replacement strategy and zero block table
+                    for start, end in ranges:
+                        start_block = (start + block_size - 1) // block_size
+                        end_block = end // block_size
+
+                        if self.replace_func:
+                            sink_block_id = bt_np[req_index, 0]
+                            if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []):
+                                if start % block_size != 0:
+                                    self.replace_func(
+                                        sink_block_id,
+                                        start_block - 1,
+                                        list(range(start % block_size, block_size)),
+                                        (start % block_size) - 1,
+                                    )
+                                if end % block_size != 0:
+                                    self.replace_func(
+                                        sink_block_id,
+                                        end_block,
+                                        list(range(0, end % block_size)),
+                                        end % block_size,
+                                    )
+                                self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block]
+                            elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []):
+                                self.replace_func(
+                                    sink_block_id,
+                                    start_block - 1,
+                                    list(range(start % block_size, end % block_size)),
+                                    max((start % block_size) - 1, 0),
+                                )
+                                self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block]
+
+                        if start_block < end_block:
+                            bt_np[req_index, start_block:end_block] = 0
+
+
     def _replace_kv_caches_sink(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
         """
         Replace fragmented evicted KV Cache with attention sink (First token)
