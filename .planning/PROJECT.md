@@ -35,7 +35,7 @@ The upgrade must preserve working thought eviction — merging upstream v0.19.0 
 
 ## Current State
 
-Phase 1 complete — pre-existing crash bugs fixed (Pydantic v2, InprocClient), dead code cleaned, v0.19.0 internals fully audited, smoke test written. Codebase is clean and ready for Phase 2 (Safe Additions).
+Phase 2 complete — all eviction modules, struct field additions, and IPC interface extensions reconciled against v0.19 base. Eviction code is present with all v0.19 features preserved (PauseMode, WAKEUP, RepetitionDetectionParams, elastic EP, SignalCallback, etc.). Ready for Phase 3 (Core Adaptation).
 
 ## Context
 
