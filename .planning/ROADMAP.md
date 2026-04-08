@@ -32,7 +32,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 3 plans
 Plans:
 - [ ] 01-01-PLAN.md -- Fix crash bugs (CLEAN-01, CLEAN-02) and cleanup dead code (D-11 through D-15)
-- [ ] 01-02-PLAN.md -- Audit v0.19.0 internals (AUDIT-01 through AUDIT-05)
+- [x] 01-02-PLAN.md -- Audit v0.19.0 internals (AUDIT-01 through AUDIT-05)
 - [ ] 01-03-PLAN.md -- Write functional smoke test (CLEAN-03)
 
 ### Phase 2: Safe Additions

@@ -13,11 +13,11 @@
 
 ### Upstream Audit
 
-- [ ] **AUDIT-01**: Verify `EngineCoreRequestType` byte values in v0.19 — confirm no collision at `b'\x05'`
-- [ ] **AUDIT-02**: Identify all new fields added to `SamplingParams` between v0.14 and v0.19
-- [ ] **AUDIT-03**: Determine v0.19 `InputBatch.block_table` API (is `.block_tables`/`.np` still present?)
-- [ ] **AUDIT-04**: Map v0.19 `schedule()` structure (ubatch loop layout)
-- [ ] **AUDIT-05**: Enumerate all v0.19 `EngineCoreClient` subclasses
+- [x] **AUDIT-01**: Verify `EngineCoreRequestType` byte values in v0.19 — confirm no collision at `b'\x05'`
+- [x] **AUDIT-02**: Identify all new fields added to `SamplingParams` between v0.14 and v0.19
+- [x] **AUDIT-03**: Determine v0.19 `InputBatch.block_table` API (is `.block_tables`/`.np` still present?)
+- [x] **AUDIT-04**: Map v0.19 `schedule()` structure (ubatch loop layout)
+- [x] **AUDIT-05**: Enumerate all v0.19 `EngineCoreClient` subclasses
 
 ### New Files and Field Additions
 
@@ -90,11 +90,11 @@
 | CLEAN-01 | Phase 1 | Pending |
 | CLEAN-02 | Phase 1 | Pending |
 | CLEAN-03 | Phase 1 | Pending |
-| AUDIT-01 | Phase 1 | Pending |
-| AUDIT-02 | Phase 1 | Pending |
-| AUDIT-03 | Phase 1 | Pending |
-| AUDIT-04 | Phase 1 | Pending |
-| AUDIT-05 | Phase 1 | Pending |
+| AUDIT-01 | Phase 1 | Complete |
+| AUDIT-02 | Phase 1 | Complete |
+| AUDIT-03 | Phase 1 | Complete |
+| AUDIT-04 | Phase 1 | Complete |
+| AUDIT-05 | Phase 1 | Complete |
 | MERGE-01 | Phase 2 | Pending |
 | MERGE-02 | Phase 2 | Pending |
 | MERGE-03 | Phase 2 | Pending |
