@@ -40,9 +40,9 @@
 
 ### Upstream Merge (Phase 02.1 — INSERTED)
 
-- [ ] **UPSTREAM-01**: Execute `git merge upstream/main` and resolve all 14 conflicting files
-- [ ] **UPSTREAM-02**: Resolve Pattern A files (10) by accepting upstream + re-appending eviction additions
-- [ ] **UPSTREAM-03**: Resolve Pattern B files (4) by accepting upstream wholesale (eviction deferred to Phase 3/4)
+- [x] **UPSTREAM-01**: Execute `git merge upstream/main` and resolve all 14 conflicting files
+- [x] **UPSTREAM-02**: Resolve Pattern A files (10) by accepting upstream + re-appending eviction additions
+- [x] **UPSTREAM-03**: Resolve Pattern B files (4) by accepting upstream wholesale (eviction deferred to Phase 3/4)
 - [ ] **UPSTREAM-04**: Verify all 7 auto-merged files preserve eviction code correctly
 - [ ] **UPSTREAM-05**: Validate msgspec field ordering (eviction fields last) in EngineCoreOutput, SchedulerOutput, SamplingParams
 
@@ -116,9 +116,9 @@
 | IPC-03 | Phase 2 | Complete |
 | IPC-04 | Phase 2 | Complete |
 | IPC-05 | Phase 2 | Complete |
-| UPSTREAM-01 | Phase 02.1 | Pending |
-| UPSTREAM-02 | Phase 02.1 | Pending |
-| UPSTREAM-03 | Phase 02.1 | Pending |
+| UPSTREAM-01 | Phase 02.1 | Complete |
+| UPSTREAM-02 | Phase 02.1 | Complete |
+| UPSTREAM-03 | Phase 02.1 | Complete |
 | UPSTREAM-04 | Phase 02.1 | Pending |
 | UPSTREAM-05 | Phase 02.1 | Pending |
 | SCHED-01 | Phase 3 | Pending |

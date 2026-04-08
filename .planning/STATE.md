@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v0.14
 milestone_name: milestone
-status: verifying
-stopped_at: Phase 3 context gathered
-last_updated: "2026-04-08T07:30:50.638Z"
+status: executing
+stopped_at: Completed 02.1-01-PLAN.md
+last_updated: "2026-04-08T12:11:35.773Z"
 last_activity: 2026-04-08
 progress:
-  total_phases: 4
+  total_phases: 5
   completed_phases: 2
-  total_plans: 5
-  completed_plans: 5
+  total_plans: 7
+  completed_plans: 6
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-07)
 
 **Core value:** Upgrade to vLLM v0.19.0 while preserving working thought eviction
-**Current focus:** Phase 02 — safe-additions
+**Current focus:** Phase 02.1 — upstream-merge-merge-upstream-main-with-eviction-adaptation-during-conflict-resolution
 
 ## Current Position
 
-Phase: 3
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 02.1 (upstream-merge-merge-upstream-main-with-eviction-adaptation-during-conflict-resolution) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-04-08
 
 Progress: [░░░░░░░░░░] 0%
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P03 | 1min | 1 tasks | 1 files |
 | Phase 02 P01 | 5min | 3 tasks | 9 files |
 | Phase 02 P02 | 7min | 3 tasks | 5 files |
+| Phase 02.1 P01 | 8min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -73,6 +74,8 @@ Recent decisions affecting current work:
 - [Phase 01]: Used stdlib urllib.request for smoke test HTTP client (no external dependency)
 - [Phase 02]: v0.19 base + append pattern for struct reconciliation; UPDATE_MASK at b'\x06'
 - [Phase 02]: v0.19 base + append pattern for IPC layer reconciliation; DP clients inherit eviction via AsyncMPClient
+- [Phase 02.1]: Pattern B files (scheduler, gpu_model_runner, serving, flash_attn) accepted upstream wholesale; eviction deferred to Phase 3/4
+- [Phase 02.1]: Adopted upstream VLLM_DISABLE_REQUEST_ID_RANDOMIZATION env var replacing hardcoded UUID suffix removal
 
 ### Roadmap Evolution
 
@@ -89,6 +92,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-08T07:30:50.629Z
-Stopped at: Phase 3 context gathered
-Resume file: .planning/phases/03-core-adaptation/03-CONTEXT.md
+Last session: 2026-04-08T12:11:35.764Z
+Stopped at: Completed 02.1-01-PLAN.md
+Resume file: None
