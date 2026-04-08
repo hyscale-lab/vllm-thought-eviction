@@ -45,7 +45,10 @@ Plans:
   3. `UPDATE_MASK` exists in `EngineCoreRequestType` at a non-colliding byte value
   4. `WorkerBase` ABC declares eviction abstract methods; `GPUWorker` implements them; all v0.19 `EngineCoreClient` subclasses (including `DPAsyncMPClient`) expose the eviction IPC methods
   5. `AsyncLLM` exposes `update_request_mask` and `get_request_l2_norms`; `EngineCore`/`EngineCoreProc` dispatch `UPDATE_MASK` correctly
-**Plans**: TBD
+**Plans**: 2 plans
+Plans:
+- [ ] 02-01-PLAN.md -- Reconcile eviction modules and struct fields (MERGE-01..08)
+- [ ] 02-02-PLAN.md -- Reconcile IPC layer: worker ABC, clients, engine dispatch (IPC-01..05)
 
 ### Phase 3: Core Adaptation
 **Goal**: The scheduler and GPU model runner correctly execute thought eviction logic on the v0.19 runtime — eviction requests are processed, L2 norms are computed, and token ranges are tracked
@@ -78,7 +81,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Groundwork & Audit | 0/3 | Planning complete | - |
-| 2. Safe Additions | 0/TBD | Not started | - |
+| 1. Groundwork & Audit | 3/3 | Complete | - |
+| 2. Safe Additions | 0/2 | Planning complete | - |
 | 3. Core Adaptation | 0/TBD | Not started | - |
 | 4. Serving & Validation | 0/TBD | Not started | - |
