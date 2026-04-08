@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. SamplingParams field additions, block table API, schedule() structure, and all EngineCoreClient subclasses in v0.19 are enumerated and recorded
 **Plans**: 3 plans
 Plans:
-- [ ] 01-01-PLAN.md -- Fix crash bugs (CLEAN-01, CLEAN-02) and cleanup dead code (D-11 through D-15)
+- [x] 01-01-PLAN.md -- Fix crash bugs (CLEAN-01, CLEAN-02) and cleanup dead code (D-11 through D-15)
 - [x] 01-02-PLAN.md -- Audit v0.19.0 internals (AUDIT-01 through AUDIT-05)
 - [ ] 01-03-PLAN.md -- Write functional smoke test (CLEAN-03)
 
