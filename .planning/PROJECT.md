@@ -35,7 +35,7 @@ The upgrade must preserve working thought eviction — merging upstream v0.19.0 
 
 ## Current State
 
-Phase 2 complete — all eviction modules, struct field additions, and IPC interface extensions reconciled against v0.19 base. Eviction code is present with all v0.19 features preserved (PauseMode, WAKEUP, RepetitionDetectionParams, elastic EP, SignalCallback, etc.). Ready for Phase 3 (Core Adaptation).
+Phase 3 complete — scheduler and GPU model runner eviction logic fully adapted to v0.19 APIs. Scheduler has eviction state, update_request_mask, _process_evictions, L2 norm differential retrieval. GPU runner has block invalidation via MultiGroupBlockTable, _compute_l2_norms adapted for PerLayerAttnMetadata, KV replacement strategies. 104/109 eviction tests pass (5 pre-existing failures). Ready for Phase 4 (Serving & Validation).
 
 ## Context
 
