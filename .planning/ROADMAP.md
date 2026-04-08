@@ -77,7 +77,11 @@ Plans:
   3. KV cache block freeing works through the v0.19 three-class coordinator hierarchy (no crash on eviction)
   4. All `SchedulerOutput` construction sites pass `evictable_token_ranges_map` (no silent empty-dict regression)
   5. GPU model runner computes L2 norms using the v0.19 `InputBatch.block_table` API without crash; dead `FlashAttentionMetadata` fields are removed
-**Plans**: TBD
+**Plans**: 3 plans
+Plans:
+- [ ] 03-01-PLAN.md -- Scheduler eviction adaptation: state, methods, L2 norm retrieval (SCHED-01..06)
+- [ ] 03-02-PLAN.md -- GPU model runner eviction adaptation: block invalidation, L2 norms, KV replacement (GPU-01..05)
+- [ ] 03-03-PLAN.md -- Fix test paths and run eviction test suite verification
 
 ### Phase 4: Serving & Validation
 **Goal**: The upgraded server starts, accepts chat completion requests with `eviction_params`, returns L2 norms, and all existing eviction tests pass
@@ -101,5 +105,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Groundwork & Audit | 3/3 | Complete | - |
 | 2. Safe Additions | 2/2 | Complete | - |
 | 02.1 Upstream Merge | 2/2 | Complete    | 2026-04-08 |
-| 3. Core Adaptation | 0/TBD | Not started | - |
+| 3. Core Adaptation | 0/3 | In progress | - |
 | 4. Serving & Validation | 0/TBD | Not started | - |
