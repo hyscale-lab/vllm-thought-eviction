@@ -21,14 +21,14 @@
 
 ### New Files and Field Additions
 
-- [ ] **MERGE-01**: Copy `vllm/thought_eviction/` module to v0.19 base
-- [ ] **MERGE-02**: Copy `vllm/v1/attention/l2_norm_cache.py` to v0.19 base
-- [ ] **MERGE-03**: Copy `tests/eviction/` to v0.19 base
-- [ ] **MERGE-04**: Append `enable_l2_norms` and `l2_norm_layers` fields to v0.19 `SamplingParams` (after all upstream fields)
-- [ ] **MERGE-05**: Append `new_l2_norms` field to v0.19 `EngineCoreOutput` (after all upstream fields)
-- [ ] **MERGE-06**: Add `UPDATE_MASK` to v0.19 `EngineCoreRequestType` (verified non-colliding byte)
-- [ ] **MERGE-07**: Append `evictable_token_ranges_map` to v0.19 `SchedulerOutput`
-- [ ] **MERGE-08**: Add `new_l2_norms` field to `RequestOutput` in `outputs.py`
+- [x] **MERGE-01**: Copy `vllm/thought_eviction/` module to v0.19 base
+- [x] **MERGE-02**: Copy `vllm/v1/attention/l2_norm_cache.py` to v0.19 base
+- [x] **MERGE-03**: Copy `tests/eviction/` to v0.19 base
+- [x] **MERGE-04**: Append `enable_l2_norms` and `l2_norm_layers` fields to v0.19 `SamplingParams` (after all upstream fields)
+- [x] **MERGE-05**: Append `new_l2_norms` field to v0.19 `EngineCoreOutput` (after all upstream fields)
+- [x] **MERGE-06**: Add `UPDATE_MASK` to v0.19 `EngineCoreRequestType` (verified non-colliding byte)
+- [x] **MERGE-07**: Append `evictable_token_ranges_map` to v0.19 `SchedulerOutput`
+- [x] **MERGE-08**: Add `new_l2_norms` field to `RequestOutput` in `outputs.py`
 
 ### Interface and IPC Layer
 
@@ -95,14 +95,14 @@
 | AUDIT-03 | Phase 1 | Complete |
 | AUDIT-04 | Phase 1 | Complete |
 | AUDIT-05 | Phase 1 | Complete |
-| MERGE-01 | Phase 2 | Pending |
-| MERGE-02 | Phase 2 | Pending |
-| MERGE-03 | Phase 2 | Pending |
-| MERGE-04 | Phase 2 | Pending |
-| MERGE-05 | Phase 2 | Pending |
-| MERGE-06 | Phase 2 | Pending |
-| MERGE-07 | Phase 2 | Pending |
-| MERGE-08 | Phase 2 | Pending |
+| MERGE-01 | Phase 2 | Complete |
+| MERGE-02 | Phase 2 | Complete |
+| MERGE-03 | Phase 2 | Complete |
+| MERGE-04 | Phase 2 | Complete |
+| MERGE-05 | Phase 2 | Complete |
+| MERGE-06 | Phase 2 | Complete |
+| MERGE-07 | Phase 2 | Complete |
+| MERGE-08 | Phase 2 | Complete |
 | IPC-01 | Phase 2 | Pending |
 | IPC-02 | Phase 2 | Pending |
 | IPC-03 | Phase 2 | Pending |

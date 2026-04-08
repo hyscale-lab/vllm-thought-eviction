@@ -15,7 +15,7 @@ Key design decisions (per design doc):
 """
 
 import asyncio
-import re
+import regex as re
 import time
 from typing import AsyncIterator, Optional
 
