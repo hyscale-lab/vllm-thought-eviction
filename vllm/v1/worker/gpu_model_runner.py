@@ -168,7 +168,6 @@ from vllm.v1.worker.ubatch_utils import (
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.workspace import lock_workspace
-from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
 
 from .utils import (
     AttentionGroup,
@@ -1227,7 +1226,8 @@ class GPUModelRunner(
         # Note: Layer is in order according to bind_kv_cache()
             
         try:
-            idx_to_name = sorted(attn_metadata_dict.keys())
+            idx_to_name = sorted(attn_metadata_dict.keys(),
+                                 key=lambda name: int(name.rsplit('.', 1)[-1]))
         except (IndexError, ValueError):
             idx_to_name = list(attn_metadata_dict.keys())
                 
@@ -1906,16 +1906,6 @@ class GPUModelRunner(
                         :num_reqs_padded
                     ],
                 )
-
-            # Get request IDs for L2 norm tracking
-            # Phase 6: Guard on per-request IPC flag — only compute norms when at
-            # least one request in the batch has eviction enabled.
-            if get_l2_norm_cache().is_enabled and any(
-                rs.sampling_params is not None and rs.sampling_params.enable_l2_norms
-                for rs in self.requests.values()
-            ):
-                extra_attn_metadata_args['request_ids'] = list(self.input_batch.req_ids[:num_reqs])
-                extra_attn_metadata_args['compute_l2_norms'] = True
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(

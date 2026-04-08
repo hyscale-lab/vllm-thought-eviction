@@ -83,18 +83,7 @@ class L2NormCache:
     Supports filtering by layer indices via `l2_norm_layers` configuration.
     """
     
-    _instance: Optional['L2NormCache'] = None
-    _lock = threading.Lock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._init_cache()
-        return cls._instance
-    
-    def _init_cache(self):
+    def __init__(self):
         """Initialize the cache."""
         self._request_data: Dict[str, RequestL2NormData] = {}
         self._data_lock = threading.Lock()
@@ -213,31 +202,6 @@ class L2NormCache:
         with self._data_lock:
             return self._request_layer_prefs.get(request_id)
 
-    def update_norms(
-        self,
-        request_id: str,
-        key_norms: torch.Tensor,
-        seq_lens: Optional[torch.Tensor] = None,
-        req_indices: Optional[List[int]] = None,
-        block_size: int = 16,
-    ):
-        """
-        Update L2 norms for a request from attention layer computation.
-        
-        Args:
-            request_id: The request ID
-            key_norms: L2 norms of keys [seq_len, num_kv_heads] or [seq_len]
-            seq_lens: Sequence lengths (optional)
-            req_indices: Request indices in batch (optional)
-            block_size: KV cache block size
-        """
-        if not self._enabled:
-            return
-        
-        request_data = self.get_or_create_request(request_id)
-        request_data.update(key_norms, seq_lens or torch.tensor([key_norms.shape[0]]),
-                           req_indices or [0], block_size)
-    
     def update_norms_batch(
         self,
         request_ids: List[str],

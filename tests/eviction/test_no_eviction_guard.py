@@ -44,9 +44,9 @@ class TestUpdateNormsBatchEvictionFilter(unittest.TestCase):
     """update_norms_batch eviction_request_ids filter — GUARD-01 inner loop."""
 
     def _reset_cache(self):
-        from vllm.v1.attention.l2_norm_cache import L2NormCache
-        L2NormCache._instance = None
-        return L2NormCache()
+        import vllm.v1.attention.l2_norm_cache as cache_mod
+        cache_mod._l2_norm_cache = None
+        return cache_mod.get_l2_norm_cache()
 
     def _make_tensors(self, num_requests: int = 1, seq_len: int = 4,
                       block_size: int = 4, num_blocks: int = 2):
