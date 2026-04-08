@@ -38,6 +38,14 @@
 - [x] **IPC-04**: Add `update_request_mask` and `get_request_l2_norms` to `AsyncLLM`
 - [x] **IPC-05**: Add `UPDATE_MASK` dispatch and utility methods to `EngineCore`/`EngineCoreProc`
 
+### Upstream Merge (Phase 02.1 — INSERTED)
+
+- [ ] **UPSTREAM-01**: Execute `git merge upstream/main` and resolve all 14 conflicting files
+- [ ] **UPSTREAM-02**: Resolve Pattern A files (10) by accepting upstream + re-appending eviction additions
+- [ ] **UPSTREAM-03**: Resolve Pattern B files (4) by accepting upstream wholesale (eviction deferred to Phase 3/4)
+- [ ] **UPSTREAM-04**: Verify all 7 auto-merged files preserve eviction code correctly
+- [ ] **UPSTREAM-05**: Validate msgspec field ordering (eviction fields last) in EngineCoreOutput, SchedulerOutput, SamplingParams
+
 ### Scheduler Adaptation
 
 - [ ] **SCHED-01**: Add `request_eviction_data` and `_l2_norm_last_index` dicts to v0.19 `Scheduler`
@@ -108,6 +116,11 @@
 | IPC-03 | Phase 2 | Complete |
 | IPC-04 | Phase 2 | Complete |
 | IPC-05 | Phase 2 | Complete |
+| UPSTREAM-01 | Phase 02.1 | Pending |
+| UPSTREAM-02 | Phase 02.1 | Pending |
+| UPSTREAM-03 | Phase 02.1 | Pending |
+| UPSTREAM-04 | Phase 02.1 | Pending |
+| UPSTREAM-05 | Phase 02.1 | Pending |
 | SCHED-01 | Phase 3 | Pending |
 | SCHED-02 | Phase 3 | Pending |
 | SCHED-03 | Phase 3 | Pending |
@@ -127,10 +140,10 @@
 | SERVE-06 | Phase 4 | Pending |
 
 **Coverage:**
-- v1 requirements: 36 total
-- Mapped to phases: 36
+- v1 requirements: 41 total
+- Mapped to phases: 41
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-07*
-*Last updated: 2026-04-07 — traceability updated to reflect 4-phase coarse consolidation*
+*Last updated: 2026-04-08 — added UPSTREAM-01..05 for Phase 02.1*

@@ -50,9 +50,26 @@ Plans:
 - [x] 02-01-PLAN.md -- Reconcile eviction modules and struct fields (MERGE-01..08)
 - [x] 02-02-PLAN.md -- Reconcile IPC layer: worker ABC, clients, engine dispatch (IPC-01..05)
 
+### Phase 02.1: Upstream Merge — merge upstream/main with eviction adaptation during conflict resolution (INSERTED)
+
+**Goal:** Merge `upstream/main` (latest HEAD) into `upgrade_vllm` branch — conflict resolution IS the adaptation. Eviction code in scheduler, GPU runner, serving layer, and all other modified files gets adapted to upstream's current APIs during merge resolution. Phase 2 reconciled files serve as conflict resolution reference for already-adapted files.
+**Requirements**: UPSTREAM-01, UPSTREAM-02, UPSTREAM-03, UPSTREAM-04, UPSTREAM-05
+**Depends on:** Phase 2
+**Success Criteria** (what must be TRUE):
+  1. `upstream/main` is merged into `upgrade_vllm` with zero conflict markers remaining
+  2. Pattern A files (10) contain upstream's latest code with eviction additions re-appended in correct positions
+  3. Pattern B files (4) contain pure upstream code (eviction deferred to Phase 3/4)
+  4. msgspec field ordering is correct: eviction fields last in `EngineCoreOutput`, `SchedulerOutput`, `SamplingParams`
+  5. All auto-merged files preserve eviction code (protocol, output_processor, outputs, worker_base, kv_cache classes)
+**Plans:** 2 plans
+
+Plans:
+- [ ] 02.1-01-PLAN.md -- Execute upstream merge, resolve 14 conflicts (Pattern A + B), commit merge
+- [ ] 02.1-02-PLAN.md -- Verify auto-merged files and validate msgspec field ordering
+
 ### Phase 3: Core Adaptation
-**Goal**: The scheduler and GPU model runner correctly execute thought eviction logic on the v0.19 runtime — eviction requests are processed, L2 norms are computed, and token ranges are tracked
-**Depends on**: Phase 2
+**Goal**: Verify that the scheduler and GPU model runner correctly execute thought eviction logic after the Phase 2.1 upstream merge — all eviction modules import cleanly, unit tests pass, and key classes instantiate without error
+**Depends on**: Phase 02.1
 **Requirements**: SCHED-01, SCHED-02, SCHED-03, SCHED-04, SCHED-05, SCHED-06, GPU-01, GPU-02, GPU-03, GPU-04, GPU-05
 **Success Criteria** (what must be TRUE):
   1. Scheduler carries `request_eviction_data` and `_l2_norm_last_index` state and `update_request_mask` / `_process_evictions` methods execute without error on a live request
@@ -82,6 +99,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Groundwork & Audit | 3/3 | Complete | - |
-| 2. Safe Additions | 0/2 | Planning complete | - |
+| 2. Safe Additions | 2/2 | Complete | - |
+| 02.1 Upstream Merge | 0/2 | Planning complete | - |
 | 3. Core Adaptation | 0/TBD | Not started | - |
 | 4. Serving & Validation | 0/TBD | Not started | - |
