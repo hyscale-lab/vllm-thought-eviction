@@ -65,7 +65,7 @@ async def update_attention_mask(request: Request):
     Used for real-time KV cache eviction with FlexAttention.
     """
     json_request = await request.json()
-    mask_request = UpdateMaskRequest.parse_obj(json_request)
+    mask_request = UpdateMaskRequest.model_validate(json_request)
     
     # The engine is typically available on the request state or as a global
     engine = request.app.state.engine

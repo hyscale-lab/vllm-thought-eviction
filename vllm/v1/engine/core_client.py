@@ -356,6 +356,28 @@ class InprocClient(EngineCoreClient):
     def dp_engines_running(self) -> bool:
         return False
 
+    async def update_request_mask_async(
+        self, request_id: str, evictable_token_ranges: list[tuple[int, int]]
+    ):
+        self.engine_core.scheduler.update_request_mask(
+            request_id, evictable_token_ranges
+        )
+
+    def update_request_mask(
+        self, request_id: str, evictable_token_ranges: list[tuple[int, int]]
+    ):
+        self.engine_core.scheduler.update_request_mask(
+            request_id, evictable_token_ranges
+        )
+
+    async def get_request_l2_norms_async(
+        self, request_id: str, start_index: int = 0
+    ) -> Optional[List[float]]:
+        from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
+        cache = get_l2_norm_cache()
+        norms = cache.get_norms(request_id, start_index)
+        return norms
+
 
 @dataclass
 class BackgroundResources:
