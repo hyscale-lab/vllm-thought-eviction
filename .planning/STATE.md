@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.14
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-04-08T13:34:23.904Z"
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-04-08T13:32:32.011Z"
 last_activity: 2026-04-08
 progress:
   total_phases: 5
-  completed_phases: 3
-  total_plans: 10
-  completed_plans: 7
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -59,7 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P02 | 7min | 3 tasks | 5 files |
 | Phase 02.1 P01 | 8min | 3 tasks | 14 files |
 | Phase 02.1 P02 | 2min | 2 tasks | 0 files |
-| Phase 03 P02 | 4min | 2 tasks | 1 files |
+| Phase 03-core-adaptation P01 | 2min | 2 tasks | 0 files |
 
 ## Accumulated Context
 
@@ -79,8 +79,7 @@ Recent decisions affecting current work:
 - [Phase 02.1]: Pattern B files (scheduler, gpu_model_runner, serving, flash_attn) accepted upstream wholesale; eviction deferred to Phase 3/4
 - [Phase 02.1]: Adopted upstream VLLM_DISABLE_REQUEST_ID_RANDOMIZATION env var replacing hardcoded UUID suffix removal
 - [Phase 02.1]: All auto-merged files verified correct; msgspec field ordering confirmed for IPC safety; zero fixes needed
-- [Phase 03]: Block invalidation targets group 0 only via block_table[0] per D-06
-- [Phase 03]: PerLayerAttnMetadata ubatch (list) mode skipped with warning for L2 norms
+- [Phase 03-core-adaptation]: Plan 03-01: All scheduler eviction logic already present from Phase 02 merge; verified and documented, no new code needed
 
 ### Roadmap Evolution
 
@@ -97,6 +96,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-08T13:34:23.894Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-04-08T13:32:32.001Z
+Stopped at: Completed 03-01-PLAN.md
 Resume file: None

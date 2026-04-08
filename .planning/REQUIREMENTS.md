@@ -48,20 +48,20 @@
 
 ### Scheduler Adaptation
 
-- [ ] **SCHED-01**: Add `request_eviction_data` and `_l2_norm_last_index` dicts to v0.19 `Scheduler`
-- [ ] **SCHED-02**: Re-apply `update_request_mask` method on scheduler
-- [ ] **SCHED-03**: Re-apply `_process_evictions` method with correct placement in v0.19 `schedule()` structure
-- [ ] **SCHED-04**: Adapt L2 norm retrieval in `update_from_output` for new multi-client dict return type
-- [ ] **SCHED-05**: Add `free_blocks` support through v0.19 KV cache coordinator hierarchy
-- [ ] **SCHED-06**: Verify all `SchedulerOutput` construction sites pass `evictable_token_ranges_map`
+- [x] **SCHED-01**: Add `request_eviction_data` and `_l2_norm_last_index` dicts to v0.19 `Scheduler`
+- [x] **SCHED-02**: Re-apply `update_request_mask` method on scheduler
+- [x] **SCHED-03**: Re-apply `_process_evictions` method with correct placement in v0.19 `schedule()` structure
+- [x] **SCHED-04**: Adapt L2 norm retrieval in `update_from_output` for new multi-client dict return type
+- [x] **SCHED-05**: Add `free_blocks` support through v0.19 KV cache coordinator hierarchy
+- [x] **SCHED-06**: Verify all `SchedulerOutput` construction sites pass `evictable_token_ranges_map`
 
 ### GPU Model Runner
 
-- [x] **GPU-01**: Adapt block table invalidation to v0.19 `InputBatch.block_table` API
-- [x] **GPU-02**: Re-apply `_compute_l2_norms` method in v0.19 model runner
-- [x] **GPU-03**: Re-apply L2 norm cache initialization and KV replacement strategy dispatch
-- [x] **GPU-04**: Re-apply `execute_model` L2 norm computation call
-- [x] **GPU-05**: Remove dead `compute_l2_norms`/`request_ids` fields from `FlashAttentionMetadata` (simplify instead of carry forward)
+- [ ] **GPU-01**: Adapt block table invalidation to v0.19 `InputBatch.block_table` API
+- [ ] **GPU-02**: Re-apply `_compute_l2_norms` method in v0.19 model runner
+- [ ] **GPU-03**: Re-apply L2 norm cache initialization and KV replacement strategy dispatch
+- [ ] **GPU-04**: Re-apply `execute_model` L2 norm computation call
+- [ ] **GPU-05**: Remove dead `compute_l2_norms`/`request_ids` fields from `FlashAttentionMetadata` (simplify instead of carry forward)
 
 ### Serving and Validation
 
@@ -121,17 +121,17 @@
 | UPSTREAM-03 | Phase 02.1 | Complete |
 | UPSTREAM-04 | Phase 02.1 | Complete |
 | UPSTREAM-05 | Phase 02.1 | Complete |
-| SCHED-01 | Phase 3 | Pending |
-| SCHED-02 | Phase 3 | Pending |
-| SCHED-03 | Phase 3 | Pending |
-| SCHED-04 | Phase 3 | Pending |
-| SCHED-05 | Phase 3 | Pending |
-| SCHED-06 | Phase 3 | Pending |
-| GPU-01 | Phase 3 | Complete |
-| GPU-02 | Phase 3 | Complete |
-| GPU-03 | Phase 3 | Complete |
-| GPU-04 | Phase 3 | Complete |
-| GPU-05 | Phase 3 | Complete |
+| SCHED-01 | Phase 3 | Complete |
+| SCHED-02 | Phase 3 | Complete |
+| SCHED-03 | Phase 3 | Complete |
+| SCHED-04 | Phase 3 | Complete |
+| SCHED-05 | Phase 3 | Complete |
+| SCHED-06 | Phase 3 | Complete |
+| GPU-01 | Phase 3 | Pending |
+| GPU-02 | Phase 3 | Pending |
+| GPU-03 | Phase 3 | Pending |
+| GPU-04 | Phase 3 | Pending |
+| GPU-05 | Phase 3 | Pending |
 | SERVE-01 | Phase 4 | Pending |
 | SERVE-02 | Phase 4 | Pending |
 | SERVE-03 | Phase 4 | Pending |
