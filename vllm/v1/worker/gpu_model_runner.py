@@ -1210,36 +1210,51 @@ class GPUModelRunner(
             kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
             kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
 
-    def _compute_l2_norms(self, attn_metadata_dict: dict[str, AttentionMetadata]) -> None:
-        # Iterate through the layers you want to track 
-        # Note: Layer is in order according to bind_kv_cache()
-            
+    def _compute_l2_norms(
+        self, attn_metadata: "PerLayerAttnMetadata"
+    ) -> None:
+        """Compute per-token L2 norms from key cache and store in L2NormCache."""
+        # Handle PerLayerAttnMetadata type: dict for standard, list for ubatch
+        if isinstance(attn_metadata, list):
+            # Ubatch mode -- skip L2 norm computation (not supported)
+            logger.warning(
+                "L2 norm computation skipped: ubatch mode not supported"
+            )
+            return
+
+        attn_metadata_dict = attn_metadata
+
         try:
-            idx_to_name = sorted(attn_metadata_dict.keys())
+            idx_to_name = sorted(
+                attn_metadata_dict.keys(),
+                key=lambda name: int(name.rsplit('.', 1)[-1]),
+            )
         except (IndexError, ValueError):
             idx_to_name = list(attn_metadata_dict.keys())
-                
-        layers_to_compute: list[torch.tensor] = []
+
+        layers_to_compute: list[torch.Tensor] = []
         block_table_list = []
         seq_lens = 0
-        
+
         for layer_idx, kv_cache in enumerate(self.kv_caches):
             # kv_cache shape: [2, num_blocks, block_size, num_heads, head_size]
             layers_to_compute.append(kv_cache[0])
-            attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
-            block_table_list.append(attn_metadata.block_table)
-            seq_lens = attn_metadata.seq_lens
-        
-        # Case where no layers computed 
+            layer_attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
+            block_table_list.append(layer_attn_metadata.block_table)
+            seq_lens = layer_attn_metadata.seq_lens
+
         if not layers_to_compute:
             return
-        
-        # Phase 6: Build per-request filter from IPC flag that traveled from API server.
+
+        # Build per-request filter from IPC flag
         eviction_req_ids = set()
         for req_id, rs in self.requests.items():
             if rs.sampling_params is not None and rs.sampling_params.enable_l2_norms:
                 eviction_req_ids.add(req_id)
-                self.l2_norm_cache.set_request_layers(req_id, rs.sampling_params.l2_norm_layers)
+                self.l2_norm_cache.set_request_layers(
+                    req_id, rs.sampling_params.l2_norm_layers,
+                )
+
         self.l2_norm_cache.update_norms_batch(
             request_ids=list(self.requests.keys()),
             key_cache=layers_to_compute,
@@ -1248,7 +1263,6 @@ class GPUModelRunner(
             block_size=self.cache_config.block_size,
             eviction_request_ids=eviction_req_ids,
         )
-        
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor
@@ -3487,13 +3501,8 @@ class GPUModelRunner(
                 **model_kwargs,
             )
         
-        # Add to L2 Norm after one forward pass
-        # Phase 6: Only call when at least one request in the batch has eviction enabled.
-        if any(
-            rs.sampling_params is not None and rs.sampling_params.enable_l2_norms
-            for rs in self.requests.values()
-        ):
-            self._compute_l2_norms(attn_metadata_dict=attn_metadata)
+        # Compute L2 norms from key cache for eviction-enabled requests
+        self._compute_l2_norms(attn_metadata)
         
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
