@@ -83,18 +83,7 @@ class L2NormCache:
     Supports filtering by layer indices via `l2_norm_layers` configuration.
     """
     
-    _instance: Optional['L2NormCache'] = None
-    _lock = threading.Lock()
-    
-    def __new__(cls):
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = super().__new__(cls)
-                    cls._instance._init_cache()
-        return cls._instance
-    
-    def _init_cache(self):
+    def __init__(self):
         """Initialize the cache."""
         self._request_data: Dict[str, RequestL2NormData] = {}
         self._data_lock = threading.Lock()
