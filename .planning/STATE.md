@@ -74,6 +74,10 @@ Recent decisions affecting current work:
 - [Phase 02]: v0.19 base + append pattern for struct reconciliation; UPDATE_MASK at b'\x06'
 - [Phase 02]: v0.19 base + append pattern for IPC layer reconciliation; DP clients inherit eviction via AsyncMPClient
 
+### Roadmap Evolution
+
+- Phase 02.1 inserted after Phase 2: Upstream Merge — merge upstream/main with eviction adaptation during conflict resolution (URGENT)
+
 ### Pending Todos
 
 None yet.
