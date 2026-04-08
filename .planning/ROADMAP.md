@@ -33,7 +33,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 - [x] 01-01-PLAN.md -- Fix crash bugs (CLEAN-01, CLEAN-02) and cleanup dead code (D-11 through D-15)
 - [x] 01-02-PLAN.md -- Audit v0.19.0 internals (AUDIT-01 through AUDIT-05)
-- [ ] 01-03-PLAN.md -- Write functional smoke test (CLEAN-03)
+- [x] 01-03-PLAN.md -- Write functional smoke test (CLEAN-03)
 
 ### Phase 2: Safe Additions
 **Goal**: All eviction modules, custom fields, and IPC interface extensions exist in the v0.19 codebase with zero conflicts — the eviction code is present but not yet wired into runtime logic

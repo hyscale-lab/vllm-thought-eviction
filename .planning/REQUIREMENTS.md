@@ -9,7 +9,7 @@
 
 - [x] **CLEAN-01**: Fix Pydantic v1 `parse_obj` crash in `api_server.py` (replace with `model_validate`)
 - [x] **CLEAN-02**: Implement `InprocClient.update_request_mask_async` (missing method)
-- [ ] **CLEAN-03**: Write functional smoke test that drives full eviction pipeline end-to-end
+- [x] **CLEAN-03**: Write functional smoke test that drives full eviction pipeline end-to-end
 
 ### Upstream Audit
 
@@ -89,7 +89,7 @@
 |-------------|-------|--------|
 | CLEAN-01 | Phase 1 | Complete |
 | CLEAN-02 | Phase 1 | Complete |
-| CLEAN-03 | Phase 1 | Pending |
+| CLEAN-03 | Phase 1 | Complete |
 | AUDIT-01 | Phase 1 | Complete |
 | AUDIT-02 | Phase 1 | Complete |
 | AUDIT-03 | Phase 1 | Complete |
