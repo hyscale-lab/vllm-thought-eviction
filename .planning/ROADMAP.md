@@ -29,7 +29,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   3. A functional smoke test drives the full eviction pipeline end-to-end and produces an observable pass/fail result
   4. `EngineCoreRequestType` byte values in v0.19 are documented and `b'\x05'` collision status is confirmed
   5. SamplingParams field additions, block table API, schedule() structure, and all EngineCoreClient subclasses in v0.19 are enumerated and recorded
-**Plans**: TBD
+**Plans**: 3 plans
+Plans:
+- [ ] 01-01-PLAN.md -- Fix crash bugs (CLEAN-01, CLEAN-02) and cleanup dead code (D-11 through D-15)
+- [ ] 01-02-PLAN.md -- Audit v0.19.0 internals (AUDIT-01 through AUDIT-05)
+- [ ] 01-03-PLAN.md -- Write functional smoke test (CLEAN-03)
 
 ### Phase 2: Safe Additions
 **Goal**: All eviction modules, custom fields, and IPC interface extensions exist in the v0.19 codebase with zero conflicts — the eviction code is present but not yet wired into runtime logic
@@ -74,7 +78,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Groundwork & Audit | 0/TBD | Not started | - |
+| 1. Groundwork & Audit | 0/3 | Planning complete | - |
 | 2. Safe Additions | 0/TBD | Not started | - |
 | 3. Core Adaptation | 0/TBD | Not started | - |
 | 4. Serving & Validation | 0/TBD | Not started | - |
