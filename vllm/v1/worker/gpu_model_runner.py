@@ -853,6 +853,21 @@ class GPUModelRunner(
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.layerwise_nvtx_hooks_registered = False
 
+        # Thought eviction state
+        self.l2_norm_cache = get_l2_norm_cache()
+
+        strategy_map = {
+            "sink": self._replace_kv_caches_sink,
+            "zero": self._replace_kv_caches_zero,
+            "nearby": self._replace_kv_caches_nearby,
+        }
+        self.replace_func = strategy_map.get(
+            envs.VLLM_KV_REPLACEMENT_STRATEGY, None
+        )
+
+        # To remember evicted ranges within the block
+        self.evicted_ranges: dict[str, list[int]] = {}
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         if self.speculative_config:
@@ -1355,6 +1370,64 @@ class GPUModelRunner(
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
 
+        # Process evictions: Invalidate evicted blocks in the block table.
+        # This ensures that the model does not attend to the freed blocks.
+        evicted_ranges = scheduler_output.evictable_token_ranges_map
+        if evicted_ranges:
+            block_table_obj = self.input_batch.block_table[0]  # Group 0 only (D-06)
+            block_size = block_table_obj.block_size
+            bt_np = block_table_obj.block_table.np
+
+            for req_id, ranges in evicted_ranges.items():
+                req_index = self.input_batch.req_id_to_index.get(req_id)
+                if req_index is not None:
+                    # Update CachedRequestState to reflect eviction
+                    if req_id in self.requests:
+                        req_state = self.requests[req_id]
+                        if len(req_state.block_ids) > 0:
+                            block_ids_list = req_state.block_ids[0]
+                            for start, end in ranges:
+                                start_block = (start + block_size - 1) // block_size
+                                end_block = end // block_size
+                                for block_idx in range(start_block, end_block):
+                                    if block_idx < len(block_ids_list):
+                                        block_ids_list[block_idx] = 0
+
+                    # Apply replacement strategy and zero block table
+                    for start, end in ranges:
+                        start_block = (start + block_size - 1) // block_size
+                        end_block = end // block_size
+
+                        if self.replace_func:
+                            sink_block_id = bt_np[req_index, 0]
+                            if start_block <= end_block and start_block not in self.evicted_ranges.get(req_id, []):
+                                if start % block_size != 0:
+                                    self.replace_func(
+                                        sink_block_id,
+                                        start_block - 1,
+                                        list(range(start % block_size, block_size)),
+                                        (start % block_size) - 1,
+                                    )
+                                if end % block_size != 0:
+                                    self.replace_func(
+                                        sink_block_id,
+                                        end_block,
+                                        list(range(0, end % block_size)),
+                                        end % block_size,
+                                    )
+                                self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block]
+                            elif start_block > end_block and start_block not in self.evicted_ranges.get(req_id, []):
+                                self.replace_func(
+                                    sink_block_id,
+                                    start_block - 1,
+                                    list(range(start % block_size, end % block_size)),
+                                    max((start % block_size) - 1, 0),
+                                )
+                                self.evicted_ranges[req_id] = self.evicted_ranges.get(req_id, []) + [start_block]
+
+                        if start_block < end_block:
+                            bt_np[req_index, start_block:end_block] = 0
+
         # Incrementally update ngram_gpu tensors after batch is stable
         if is_ngram_gpu:
             update_ngram_gpu_tensors_incremental(
@@ -1400,6 +1473,127 @@ class GPUModelRunner(
             return correct_spec_decode_token_counts
         else:
             return None
+
+    def _replace_kv_caches_sink(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return
+
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+
+        logger.info("sink")
+
+        for kv_cache in self.kv_caches:
+            # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
+            # 1. Extract the Sink K and V from slot 0 of the sink block
+            # Resulting shape: [num_kv_heads, head_size]
+            sink_k = kv_cache[0, sink_block_id, 0]
+            sink_v = kv_cache[1, sink_block_id, 0]
+
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
+            kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
+
+    def _replace_kv_caches_zero(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return
+
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+
+        logger.info("zero")
+
+        for kv_cache in self.kv_caches:
+
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = 0
+            kv_cache[1, destination_block_id, offsets_gpu] = 0
+
+    def _replace_kv_caches_nearby(self, sink_block_id:int, destination_block_id: int, offset_indices: list[int], index: int = 0) -> None:
+        """
+        Replace fragmented evicted KV Cache with attention sink (First token)
+        """
+        if not offset_indices:
+            return
+
+        offsets_gpu = torch.tensor(offset_indices, device=self.device, dtype=torch.long)
+
+        logger.info("nearby")
+
+        for kv_cache in self.kv_caches:
+            # kv_cache Shape: [2, num_blocks, block_size, heads, head_size]
+            # 1. Extract the Sink K and V from slot 0 of the sink block
+            # Resulting shape: [num_kv_heads, head_size]
+            sink_k = kv_cache[0, destination_block_id, index]
+            sink_v = kv_cache[1, destination_block_id, index]
+
+            # 2. Vectorized overwrite using advanced indexing
+            # We index: [K/V plane, Physical Block ID, List of Slot Offsets]
+            # PyTorch broadcasts sink_k/sink_v across all offsets_gpu
+            kv_cache[0, destination_block_id, offsets_gpu] = sink_k.clone()
+            kv_cache[1, destination_block_id, offsets_gpu] = sink_v.clone()
+
+    def _compute_l2_norms(
+        self, attn_metadata: "PerLayerAttnMetadata"
+    ) -> None:
+        """Compute per-token L2 norms from key cache and store in L2NormCache."""
+        # Handle PerLayerAttnMetadata type: dict for standard, list for ubatch
+        if isinstance(attn_metadata, list):
+            # Ubatch mode -- skip L2 norm computation (not supported)
+            logger.warning(
+                "L2 norm computation skipped: ubatch mode not supported"
+            )
+            return
+
+        attn_metadata_dict = attn_metadata
+
+        try:
+            idx_to_name = sorted(
+                attn_metadata_dict.keys(),
+                key=lambda name: int(name.rsplit('.', 1)[-1]),
+            )
+        except (IndexError, ValueError):
+            idx_to_name = list(attn_metadata_dict.keys())
+
+        layers_to_compute: list[torch.Tensor] = []
+        block_table_list = []
+        seq_lens = 0
+
+        for layer_idx, kv_cache in enumerate(self.kv_caches):
+            # kv_cache shape: [2, num_blocks, block_size, num_heads, head_size]
+            layers_to_compute.append(kv_cache[0])
+            layer_attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
+            block_table_list.append(layer_attn_metadata.block_table)
+            seq_lens = layer_attn_metadata.seq_lens
+
+        if not layers_to_compute:
+            return
+
+        # Build per-request filter from IPC flag
+        eviction_req_ids = set()
+        for req_id, rs in self.requests.items():
+            if rs.sampling_params is not None and rs.sampling_params.enable_l2_norms:
+                eviction_req_ids.add(req_id)
+                self.l2_norm_cache.set_request_layers(
+                    req_id, rs.sampling_params.l2_norm_layers,
+                )
+
+        self.l2_norm_cache.update_norms_batch(
+            request_ids=list(self.requests.keys()),
+            key_cache=layers_to_compute,
+            block_table=block_table_list,
+            seq_lens=seq_lens,
+            block_size=self.cache_config.block_size,
+            eviction_request_ids=eviction_req_ids,
+        )
 
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
@@ -4027,6 +4221,9 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        # Compute L2 norms from key cache for eviction-enabled requests
+        self._compute_l2_norms(attn_metadata)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
