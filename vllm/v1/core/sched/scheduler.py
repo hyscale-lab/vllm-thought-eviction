@@ -182,6 +182,12 @@ class Scheduler(SchedulerInterface):
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
 
+        # Thought eviction state
+        # req_id -> evictable ranges (managed by scheduler)
+        self.request_eviction_data: dict[str, list[tuple[int, int]]] = {}
+        # req_id -> last L2 norm index retrieved (differential retrieval)
+        self._l2_norm_last_index: dict[str, int] = {}
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = mm_registry.supports_multimodal_inputs(
@@ -356,6 +362,9 @@ class Scheduler(SchedulerInterface):
         # num_tokens_with_spec. This is general enough to cover
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
+
+        # Process evictions first to free up blocks; capture ranges for SchedulerOutput
+        processed_ranges = self._process_evictions()
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -927,6 +936,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            evictable_token_ranges_map=processed_ranges or None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -947,6 +957,49 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def update_request_mask(self, request_id: str,
+                           evictable_token_ranges: list[tuple[int, int]]):
+        """
+        Stores the evictable token ranges for a request.
+        This is robust to race conditions where the update arrives before the
+        request is officially added. The data will be stored and picked up
+        when the request is scheduled.
+        """
+        self.request_eviction_data[request_id] = evictable_token_ranges
+        logger.debug(f"Stored evictable ranges for request {request_id}")
+
+    def _process_evictions(self) -> dict[str, list[tuple[int, int]]]:
+        """Process evictable token ranges and free corresponding physical blocks."""
+        if not self.request_eviction_data:
+            return {}
+
+        block_size = self.kv_cache_manager.block_size
+        if block_size is None:
+            return {}
+
+        processed: list[str] = []
+        for request_id, ranges in self.request_eviction_data.items():
+            blocks_to_free: set[int] = set()
+            for start, end in ranges:
+                start_block = (start + block_size - 1) // block_size
+                end_block = end // block_size
+                if start_block < end_block:
+                    blocks_to_free.update(range(start_block, end_block))
+
+            if blocks_to_free:
+                self.kv_cache_manager.free_blocks(request_id, list(blocks_to_free))
+            processed.append(request_id)
+
+        processed_ranges: dict[str, list[tuple[int, int]]] = {
+            req_id: self.request_eviction_data[req_id]
+            for req_id in processed
+        }
+
+        for request_id in processed:
+            del self.request_eviction_data[request_id]
+
+        return processed_ranges
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
@@ -1453,6 +1506,31 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            # Fetch differential L2 norms if available.
+            # omit_defaults=True on EngineCoreOutput means None is omitted
+            # from serialization -- zero IPC overhead for non-eviction requests.
+            new_l2_norms = None
+            try:
+                from vllm.v1.attention.l2_norm_cache import get_l2_norm_cache
+            except ImportError:
+                get_l2_norm_cache = None
+
+            if get_l2_norm_cache is not None:
+                try:
+                    if (request.sampling_params is not None
+                            and request.sampling_params.enable_l2_norms):
+                        l2_cache = get_l2_norm_cache()
+                        start_idx = self._l2_norm_last_index.get(req_id, 0)
+                        norms = l2_cache.get_norms(req_id, start_idx)
+                        if norms:
+                            new_l2_norms = norms
+                            self._l2_norm_last_index[req_id] = start_idx + len(norms)
+                except Exception:
+                    logger.exception(
+                        "Unexpected error fetching L2 norms for request %s",
+                        req_id,
+                    )
+
             if (
                 new_token_ids
                 or pooler_output is not None
@@ -1476,6 +1554,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        new_l2_norms=new_l2_norms,
                     )
                 )
             else:
@@ -1831,6 +1910,9 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
+
+        self.request_eviction_data.pop(request.request_id, None)
+        self._l2_norm_last_index.pop(request.request_id, None)
 
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
