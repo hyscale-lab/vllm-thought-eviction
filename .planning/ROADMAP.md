@@ -47,8 +47,8 @@ Plans:
   5. `AsyncLLM` exposes `update_request_mask` and `get_request_l2_norms`; `EngineCore`/`EngineCoreProc` dispatch `UPDATE_MASK` correctly
 **Plans**: 2 plans
 Plans:
-- [ ] 02-01-PLAN.md -- Reconcile eviction modules and struct fields (MERGE-01..08)
-- [ ] 02-02-PLAN.md -- Reconcile IPC layer: worker ABC, clients, engine dispatch (IPC-01..05)
+- [x] 02-01-PLAN.md -- Reconcile eviction modules and struct fields (MERGE-01..08)
+- [x] 02-02-PLAN.md -- Reconcile IPC layer: worker ABC, clients, engine dispatch (IPC-01..05)
 
 ### Phase 3: Core Adaptation
 **Goal**: The scheduler and GPU model runner correctly execute thought eviction logic on the v0.19 runtime — eviction requests are processed, L2 norms are computed, and token ranges are tracked

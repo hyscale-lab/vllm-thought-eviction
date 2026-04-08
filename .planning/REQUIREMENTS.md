@@ -32,11 +32,11 @@
 
 ### Interface and IPC Layer
 
-- [ ] **IPC-01**: Add eviction abstract methods to v0.19 `WorkerBase` ABC
-- [ ] **IPC-02**: Implement eviction methods on `GPUWorker`
-- [ ] **IPC-03**: Add eviction methods to ALL v0.19 `EngineCoreClient` subclasses (including `DPAsyncMPClient` and any actor-based clients)
-- [ ] **IPC-04**: Add `update_request_mask` and `get_request_l2_norms` to `AsyncLLM`
-- [ ] **IPC-05**: Add `UPDATE_MASK` dispatch and utility methods to `EngineCore`/`EngineCoreProc`
+- [x] **IPC-01**: Add eviction abstract methods to v0.19 `WorkerBase` ABC
+- [x] **IPC-02**: Implement eviction methods on `GPUWorker`
+- [x] **IPC-03**: Add eviction methods to ALL v0.19 `EngineCoreClient` subclasses (including `DPAsyncMPClient` and any actor-based clients)
+- [x] **IPC-04**: Add `update_request_mask` and `get_request_l2_norms` to `AsyncLLM`
+- [x] **IPC-05**: Add `UPDATE_MASK` dispatch and utility methods to `EngineCore`/`EngineCoreProc`
 
 ### Scheduler Adaptation
 
@@ -103,11 +103,11 @@
 | MERGE-06 | Phase 2 | Complete |
 | MERGE-07 | Phase 2 | Complete |
 | MERGE-08 | Phase 2 | Complete |
-| IPC-01 | Phase 2 | Pending |
-| IPC-02 | Phase 2 | Pending |
-| IPC-03 | Phase 2 | Pending |
-| IPC-04 | Phase 2 | Pending |
-| IPC-05 | Phase 2 | Pending |
+| IPC-01 | Phase 2 | Complete |
+| IPC-02 | Phase 2 | Complete |
+| IPC-03 | Phase 2 | Complete |
+| IPC-04 | Phase 2 | Complete |
+| IPC-05 | Phase 2 | Complete |
 | SCHED-01 | Phase 3 | Pending |
 | SCHED-02 | Phase 3 | Pending |
 | SCHED-03 | Phase 3 | Pending |
