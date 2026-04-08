@@ -84,11 +84,15 @@ def vllm_server():
         "--trust-remote-code",
     ]
 
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = "0"
+
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        env=env,
     )
 
     try:
@@ -183,11 +187,11 @@ def test_eviction_smoke(vllm_server):
         "stream": True,
         "max_tokens": 2048,
         "eviction_params": {
-            "strategy": "global",
-            "keep_ratio": 0.5,
+            "strategy": "thought_min",
+            "keep_ratio": 0.6,
             "prune_after_tokens": 50,
-            "trigger_mode": "periodic",
-            "l2_norm_layers": [0, 1, 2],
+            "trigger_mode": "time",
+            "l2_norm_layers": [8, 10],
         },
     }
 
