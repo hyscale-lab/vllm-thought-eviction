@@ -79,9 +79,9 @@ Plans:
   5. GPU model runner computes L2 norms using the v0.19 `InputBatch.block_table` API without crash; dead `FlashAttentionMetadata` fields are removed
 **Plans**: 3 plans
 Plans:
-- [ ] 03-01-PLAN.md -- Scheduler eviction adaptation: state, methods, L2 norm retrieval (SCHED-01..06)
-- [ ] 03-02-PLAN.md -- GPU model runner eviction adaptation: block invalidation, L2 norms, KV replacement (GPU-01..05)
-- [ ] 03-03-PLAN.md -- Fix test paths and run eviction test suite verification
+- [x] 03-01-PLAN.md -- Scheduler eviction adaptation: state, methods, L2 norm retrieval (SCHED-01..06)
+- [x] 03-02-PLAN.md -- GPU model runner eviction adaptation: block invalidation, L2 norms, KV replacement (GPU-01..05)
+- [x] 03-03-PLAN.md -- Fix test paths and run eviction test suite verification
 
 ### Phase 4: Serving & Validation
 **Goal**: The upgraded server starts, accepts chat completion requests with `eviction_params`, returns L2 norms, and all existing eviction tests pass

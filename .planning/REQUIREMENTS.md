@@ -57,11 +57,11 @@
 
 ### GPU Model Runner
 
-- [ ] **GPU-01**: Adapt block table invalidation to v0.19 `InputBatch.block_table` API
-- [ ] **GPU-02**: Re-apply `_compute_l2_norms` method in v0.19 model runner
-- [ ] **GPU-03**: Re-apply L2 norm cache initialization and KV replacement strategy dispatch
-- [ ] **GPU-04**: Re-apply `execute_model` L2 norm computation call
-- [ ] **GPU-05**: Remove dead `compute_l2_norms`/`request_ids` fields from `FlashAttentionMetadata` (simplify instead of carry forward)
+- [x] **GPU-01**: Adapt block table invalidation to v0.19 `InputBatch.block_table` API
+- [x] **GPU-02**: Re-apply `_compute_l2_norms` method in v0.19 model runner
+- [x] **GPU-03**: Re-apply L2 norm cache initialization and KV replacement strategy dispatch
+- [x] **GPU-04**: Re-apply `execute_model` L2 norm computation call
+- [x] **GPU-05**: Remove dead `compute_l2_norms`/`request_ids` fields from `FlashAttentionMetadata` (simplify instead of carry forward)
 
 ### Serving and Validation
 
@@ -127,11 +127,11 @@
 | SCHED-04 | Phase 3 | Complete |
 | SCHED-05 | Phase 3 | Complete |
 | SCHED-06 | Phase 3 | Complete |
-| GPU-01 | Phase 3 | Pending |
-| GPU-02 | Phase 3 | Pending |
-| GPU-03 | Phase 3 | Pending |
-| GPU-04 | Phase 3 | Pending |
-| GPU-05 | Phase 3 | Pending |
+| GPU-01 | Phase 3 | Complete |
+| GPU-02 | Phase 3 | Complete |
+| GPU-03 | Phase 3 | Complete |
+| GPU-04 | Phase 3 | Complete |
+| GPU-05 | Phase 3 | Complete |
 | SERVE-01 | Phase 4 | Pending |
 | SERVE-02 | Phase 4 | Pending |
 | SERVE-03 | Phase 4 | Pending |
