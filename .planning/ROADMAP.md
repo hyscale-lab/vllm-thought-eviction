@@ -105,5 +105,5 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 1. Groundwork & Audit | 3/3 | Complete | - |
 | 2. Safe Additions | 2/2 | Complete | - |
 | 02.1 Upstream Merge | 2/2 | Complete    | 2026-04-08 |
-| 3. Core Adaptation | 0/3 | In progress | - |
+| 3. Core Adaptation | 0/3 | Planned    |  |
 | 4. Serving & Validation | 0/TBD | Not started | - |

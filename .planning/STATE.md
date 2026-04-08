@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v0.14
 milestone_name: milestone
-status: verifying
-stopped_at: Phase 03 context updated
-last_updated: "2026-04-08T12:58:04.335Z"
+status: executing
+stopped_at: Completed 03-02-PLAN.md
+last_updated: "2026-04-08T13:34:23.904Z"
 last_activity: 2026-04-08
 progress:
   total_phases: 5
   completed_phases: 3
-  total_plans: 7
+  total_plans: 10
   completed_plans: 7
   percent: 0
 ---
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-07)
 
 **Core value:** Upgrade to vLLM v0.19.0 while preserving working thought eviction
-**Current focus:** Phase 02.1 — upstream-merge-merge-upstream-main-with-eviction-adaptation-during-conflict-resolution
+**Current focus:** Phase 03 — core-adaptation
 
 ## Current Position
 
-Phase: 03
-Plan: Not started
-Status: Phase complete — ready for verification
+Phase: 03 (core-adaptation) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-04-08
 
 Progress: [░░░░░░░░░░] 0%
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P02 | 7min | 3 tasks | 5 files |
 | Phase 02.1 P01 | 8min | 3 tasks | 14 files |
 | Phase 02.1 P02 | 2min | 2 tasks | 0 files |
+| Phase 03 P02 | 4min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,8 @@ Recent decisions affecting current work:
 - [Phase 02.1]: Pattern B files (scheduler, gpu_model_runner, serving, flash_attn) accepted upstream wholesale; eviction deferred to Phase 3/4
 - [Phase 02.1]: Adopted upstream VLLM_DISABLE_REQUEST_ID_RANDOMIZATION env var replacing hardcoded UUID suffix removal
 - [Phase 02.1]: All auto-merged files verified correct; msgspec field ordering confirmed for IPC safety; zero fixes needed
+- [Phase 03]: Block invalidation targets group 0 only via block_table[0] per D-06
+- [Phase 03]: PerLayerAttnMetadata ubatch (list) mode skipped with warning for L2 norms
 
 ### Roadmap Evolution
 
@@ -94,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-08T12:58:04.325Z
-Stopped at: Phase 03 context updated
-Resume file: .planning/phases/03-core-adaptation/03-CONTEXT.md
+Last session: 2026-04-08T13:34:23.894Z
+Stopped at: Completed 03-02-PLAN.md
+Resume file: None
