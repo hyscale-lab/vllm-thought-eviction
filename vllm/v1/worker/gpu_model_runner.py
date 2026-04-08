@@ -4223,7 +4223,12 @@ class GPUModelRunner(
             )
 
         # Compute L2 norms from key cache for eviction-enabled requests
-        self._compute_l2_norms(attn_metadata)
+        # Guard: only enter norm computation if any request has enable_l2_norms
+        if any(
+            rs.sampling_params is not None and rs.sampling_params.enable_l2_norms
+            for rs in self.requests.values()
+        ):
+            self._compute_l2_norms(attn_metadata)
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
