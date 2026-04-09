@@ -11,17 +11,25 @@ from typing import Any
 import ijson
 import regex as re
 from mistral_common.protocol.instruct.tool_calls import (
-    NamedToolChoice as MistralNamedToolChoice,
-)
-from mistral_common.protocol.instruct.tool_calls import (
     Tool as MistralTool,
 )
 from mistral_common.protocol.instruct.tool_calls import (
     ToolChoice as MistralToolChoice,
 )
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoiceEnum as MistralToolChoiceEnum,
-)
+
+try:
+    from mistral_common.protocol.instruct.tool_calls import (
+        NamedToolChoice as MistralNamedToolChoice,
+    )
+except ImportError:
+    MistralNamedToolChoice = None  # type: ignore[assignment,misc]
+
+try:
+    from mistral_common.protocol.instruct.tool_calls import (
+        ToolChoiceEnum as MistralToolChoiceEnum,
+    )
+except ImportError:
+    MistralToolChoiceEnum = None  # type: ignore[assignment,misc]
 from pydantic import Field
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
