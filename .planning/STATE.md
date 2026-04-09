@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v0.14
 milestone_name: milestone
-status: executing
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-04-09T13:14:45.755Z"
+status: verifying
+stopped_at: Completed 04-02-PLAN.md
+last_updated: "2026-04-09T13:21:23.295Z"
 last_activity: 2026-04-09
 progress:
   total_phases: 5
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 12
-  completed_plans: 11
+  completed_plans: 12
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-07)
 
 Phase: 04 (serving-validation) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-09
 
 Progress: [░░░░░░░░░░] 0%
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03-core-adaptation P01 | 2min | 2 tasks | 0 files |
 | Phase 03-core-adaptation P03 | 8min | 2 tasks | 2 files |
 | Phase 04-serving-validation P01 | 13min | 3 tasks | 4 files |
+| Phase 04-serving-validation P02 | 6min | 3 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -85,6 +86,8 @@ Recent decisions affecting current work:
 - [Phase 03-core-adaptation]: Plan 03-03: Added GPU runner call-site guard for enable_l2_norms; 5 pre-existing test failures deferred
 - [Phase 04-serving-validation]: GlobalStrategy no longer has prune_after_tokens gate — orchestrator enforces it; tests updated to reflect actual strategy behavior
 - [Phase 04-serving-validation]: mistral_common 1.10.0 is missing NamedToolChoice and ToolChoiceEnum — guarded with try/except rather than pinning package version
+- [Phase 04-serving-validation]: Server --help RuntimeError is upstream hardware detection issue (no GPU): DeviceConfig.__post_init__ requires platform; eviction module imports succeed
+- [Phase 04-serving-validation]: Smoke test SKIPPED is correct and expected outcome on CPU-only login nodes (GPU-gated by design)
 
 ### Roadmap Evolution
 
@@ -101,6 +104,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-09T13:14:45.747Z
-Stopped at: Completed 04-01-PLAN.md
+Last session: 2026-04-09T13:21:23.285Z
+Stopped at: Completed 04-02-PLAN.md
 Resume file: None

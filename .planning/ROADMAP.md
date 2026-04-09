@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 1: Groundwork & Audit** - Fix pre-existing bugs, write functional smoke test, resolve 5 open research questions
 - [ ] **Phase 2: Safe Additions** - Copy eviction modules to v0.19 base, append fields to structs, extend interface/IPC layer
 - [ ] **Phase 3: Core Adaptation** - Re-apply scheduler logic with return-type rewrite, adapt GPU model runner to v0.19 block table API
-- [ ] **Phase 4: Serving & Validation** - Wire serving layer, run full eviction test suite, verify live server handles eviction requests
+- [x] **Phase 4: Serving & Validation** - Wire serving layer, run full eviction test suite, verify live server handles eviction requests (completed 2026-04-09)
 
 ## Phase Details
 
