@@ -65,10 +65,10 @@
 
 ### Serving and Validation
 
-- [ ] **SERVE-01**: Re-apply `EvictionParams` and `eviction_params` field on `ChatCompletionRequest`
-- [ ] **SERVE-02**: Re-apply eviction wiring in `create_chat_completion`
-- [ ] **SERVE-03**: Register `/v1/attention/l2_norms` endpoint on v0.19 `api_server.py`
-- [ ] **SERVE-04**: All existing eviction tests pass (`tests/eviction/`)
+- [x] **SERVE-01**: Re-apply `EvictionParams` and `eviction_params` field on `ChatCompletionRequest`
+- [x] **SERVE-02**: Re-apply eviction wiring in `create_chat_completion`
+- [x] **SERVE-03**: Register `/v1/attention/l2_norms` endpoint on v0.19 `api_server.py`
+- [x] **SERVE-04**: All existing eviction tests pass (`tests/eviction/`)
 - [ ] **SERVE-05**: Server starts and handles chat completion requests with `eviction_params`
 - [ ] **SERVE-06**: Functional smoke test passes end-to-end
 
@@ -132,10 +132,10 @@
 | GPU-03 | Phase 3 | Complete |
 | GPU-04 | Phase 3 | Complete |
 | GPU-05 | Phase 3 | Complete |
-| SERVE-01 | Phase 4 | Pending |
-| SERVE-02 | Phase 4 | Pending |
-| SERVE-03 | Phase 4 | Pending |
-| SERVE-04 | Phase 4 | Pending |
+| SERVE-01 | Phase 4 | Complete |
+| SERVE-02 | Phase 4 | Complete |
+| SERVE-03 | Phase 4 | Complete |
+| SERVE-04 | Phase 4 | Complete |
 | SERVE-05 | Phase 4 | Pending |
 | SERVE-06 | Phase 4 | Pending |
 

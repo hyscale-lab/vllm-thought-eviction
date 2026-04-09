@@ -95,7 +95,7 @@ Plans:
   5. A live chat completion request with `eviction_params` completes successfully and the functional smoke test passes end-to-end
 **Plans**: 2 plans
 Plans:
-- [ ] 04-01-PLAN.md — Serving wiring + all test fixes (SERVE-01, SERVE-02, SERVE-03, SERVE-04)
+- [x] 04-01-PLAN.md — Serving wiring + all test fixes (SERVE-01, SERVE-02, SERVE-03, SERVE-04)
 - [ ] 04-02-PLAN.md — Server startup + smoke test (SERVE-05, SERVE-06)
 
 ## Progress
@@ -109,4 +109,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4
 | 2. Safe Additions | 2/2 | Complete | - |
 | 02.1 Upstream Merge | 2/2 | Complete    | 2026-04-08 |
 | 3. Core Adaptation | 0/3 | In progress | - |
-| 4. Serving & Validation | 0/2 | Not started | - |
+| 4. Serving & Validation | 1/2 | In Progress|  |

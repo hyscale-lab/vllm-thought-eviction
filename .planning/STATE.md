@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v0.14
 milestone_name: milestone
 status: executing
-stopped_at: Completed 03-03-PLAN.md
-last_updated: "2026-04-08T14:01:06.773Z"
-last_activity: 2026-04-08
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-04-09T13:14:45.755Z"
+last_activity: 2026-04-09
 progress:
   total_phases: 5
   completed_phases: 4
-  total_plans: 10
-  completed_plans: 10
+  total_plans: 12
+  completed_plans: 11
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-07)
 
 **Core value:** Upgrade to vLLM v0.19.0 while preserving working thought eviction
-**Current focus:** Phase 03 — core-adaptation
+**Current focus:** Phase 04 — serving-validation
 
 ## Current Position
 
-Phase: 4
-Plan: Not started
+Phase: 04 (serving-validation) — EXECUTING
+Plan: 2 of 2
 Status: Ready to execute
-Last activity: 2026-04-08
+Last activity: 2026-04-09
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02.1 P02 | 2min | 2 tasks | 0 files |
 | Phase 03-core-adaptation P01 | 2min | 2 tasks | 0 files |
 | Phase 03-core-adaptation P03 | 8min | 2 tasks | 2 files |
+| Phase 04-serving-validation P01 | 13min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,8 @@ Recent decisions affecting current work:
 - [Phase 02.1]: All auto-merged files verified correct; msgspec field ordering confirmed for IPC safety; zero fixes needed
 - [Phase 03-core-adaptation]: Plan 03-01: All scheduler eviction logic already present from Phase 02 merge; verified and documented, no new code needed
 - [Phase 03-core-adaptation]: Plan 03-03: Added GPU runner call-site guard for enable_l2_norms; 5 pre-existing test failures deferred
+- [Phase 04-serving-validation]: GlobalStrategy no longer has prune_after_tokens gate — orchestrator enforces it; tests updated to reflect actual strategy behavior
+- [Phase 04-serving-validation]: mistral_common 1.10.0 is missing NamedToolChoice and ToolChoiceEnum — guarded with try/except rather than pinning package version
 
 ### Roadmap Evolution
 
@@ -98,6 +101,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-08T13:52:13.146Z
-Stopped at: Completed 03-03-PLAN.md
+Last session: 2026-04-09T13:14:45.747Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None
