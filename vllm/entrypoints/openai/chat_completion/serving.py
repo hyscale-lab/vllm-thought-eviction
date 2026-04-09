@@ -78,6 +78,8 @@ from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
+from vllm.thought_eviction.orchestrator import EvictionOrchestrator
+
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
@@ -280,6 +282,12 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                # Set per-request L2 norm flag for IPC to EngineCore worker.
+                # Random strategy selects thoughts uniformly — no L2 norms needed.
+                if (request.eviction_params is not None
+                        and request.eviction_params.strategy != "random"):
+                    sampling_params.enable_l2_norms = True
+                    sampling_params.l2_norm_layers = request.eviction_params.l2_norm_layers
 
             self._log_inputs(
                 sub_request_id,
@@ -328,7 +336,26 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
+        # Eviction requires streaming — reject non-streaming requests early.
+        if request.eviction_params is not None and not request.stream:
+            return self.create_error_response(
+                "eviction_params requires stream=true. "
+                "Server-side eviction operates on the streaming token "
+                "pipeline and cannot run on non-streaming requests.",
+            )
+
         if request.stream:
+            # Wrap stream with eviction orchestrator when eviction_params present.
+            orchestrator = None
+            if request.eviction_params is not None:
+                orchestrator = EvictionOrchestrator(
+                    eviction_params=request.eviction_params,
+                    engine_client=self.engine_client,
+                    tokenizer=tokenizer,
+                    request_id=request_id,
+                    block_size=self.engine_client.vllm_config.cache_config.block_size,
+                )
+                result_generator = orchestrator.wrap_stream(result_generator)
             return self.chat_completion_stream_generator(
                 request,
                 result_generator,
@@ -338,6 +365,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 reasoning_parser,
+                orchestrator=orchestrator,
             )
 
         return await self.chat_completion_full_generator(
@@ -505,6 +533,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
+        orchestrator: "EvictionOrchestrator | None" = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -1199,6 +1228,10 @@ class OpenAIServingChat(OpenAIServing):
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
+
+                    # Inject eviction stats on the finish_reason chunk.
+                    if orchestrator is not None and finish_reason_sent[i]:
+                        chunk.eviction = orchestrator.build_eviction_payload()
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
