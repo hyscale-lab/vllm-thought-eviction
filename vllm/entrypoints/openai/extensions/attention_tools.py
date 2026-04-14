@@ -2,16 +2,20 @@ from http import HTTPStatus
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import JSONResponse
 
+from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.extensions.protocol import (
-    UpdateMaskRequest, L2NormsRequest, 
+    UpdateMaskRequest, L2NormsRequest,
     EvictKVBlocksRequest, L2NormConfigRequest
 )
-
-from vllm.entrypoints.openai.api_server import engine_client
 from vllm.logger import init_logger
 
 
 logger = init_logger(__name__)
+
+
+def engine_client(request: Request) -> EngineClient:
+    return request.app.state.engine_client
+
 
 router = APIRouter()
 

@@ -36,7 +36,7 @@ pytestmark = pytest.mark.skipif(
 # Constants
 # ---------------------------------------------------------------------------
 
-MODEL_PATH = os.path.expandvars("$HOME/scratch/models/deepseek-8b")
+MODEL_PATH = os.path.expandvars("$HOME/scratch/models/Qwen3.5-9B")
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8192  # non-default to avoid conflicts
 HEALTH_TIMEOUT = 300  # seconds — model loading is slow
@@ -185,7 +185,7 @@ def test_eviction_smoke(vllm_server):
             }
         ],
         "stream": True,
-        "max_tokens": 2048,
+        "max_tokens": 7000,
         "eviction_params": {
             "strategy": "thought_min",
             "keep_ratio": 0.6,
