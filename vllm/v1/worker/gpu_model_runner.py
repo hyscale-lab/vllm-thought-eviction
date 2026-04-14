@@ -1570,8 +1570,14 @@ class GPUModelRunner(
 
         for layer_idx, kv_cache in enumerate(self.kv_caches):
             # kv_cache shape: [2, num_blocks, block_size, num_heads, head_size]
-            layers_to_compute.append(kv_cache[0])
+            # Hybrid models (e.g. Qwen3-Next) interleave full-attention layers
+            # with linear/GDN/Mamba layers whose metadata has no block_table
+            # and whose kv_cache is a state buffer, not a paged attention cache.
+            # Only standard attention layers contribute to L2-norm eviction.
             layer_attn_metadata = attn_metadata_dict[idx_to_name[layer_idx]]
+            if not hasattr(layer_attn_metadata, "block_table"):
+                continue
+            layers_to_compute.append(kv_cache[0])
             block_table_list.append(layer_attn_metadata.block_table)
             seq_lens = layer_attn_metadata.seq_lens
 
