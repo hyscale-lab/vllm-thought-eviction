@@ -21,6 +21,8 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
+from vllm.steer_vectors.request import SteerVectorRequest
+
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
@@ -75,6 +77,7 @@ class EngineClient(ABC):
         *,
         prompt_text: str | None = None,
         lora_request: LoRARequest | None = None,
+        steer_vector_request: SteerVectorRequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,

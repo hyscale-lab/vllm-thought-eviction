@@ -65,6 +65,7 @@ from vllm.inputs import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.steer_vectors.request import SteerVectorRequest
 from vllm.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,
@@ -453,6 +454,7 @@ class LLM:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        steer_vector_request: Sequence[SteerVectorRequest] | SteerVectorRequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
@@ -504,6 +506,7 @@ class LLM:
             output_type=RequestOutput,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            steer_vector_request=steer_vector_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
@@ -513,6 +516,7 @@ class LLM:
         prompts: PromptType | Sequence[PromptType],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        steer_vector_request: Sequence[SteerVectorRequest] | SteerVectorRequest | None = None,
         priority: list[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -546,6 +550,7 @@ class LLM:
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            steer_vector_request=steer_vector_request,
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
         )
@@ -1603,6 +1608,22 @@ class LLM:
 
         return [lora_request] * num_requests
 
+    def _steer_vector_request_to_seq(
+        self,
+        steer_vector_request: SteerVectorRequest | None | Sequence[SteerVectorRequest | None],
+        num_requests: int,
+    ) -> Sequence[SteerVectorRequest | None]:
+        if isinstance(steer_vector_request, Sequence):
+            if len(steer_vector_request) != num_requests:
+                raise ValueError(
+                    f"The lengths of prompts ({num_requests}) "
+                    f"and steer_vector_request ({len(steer_vector_request)}) must be the same."
+                )
+
+            return steer_vector_request
+
+        return [steer_vector_request] * num_requests
+
     def _priority_to_seq(
         self,
         priority: list[int] | None,
@@ -1628,12 +1649,14 @@ class LLM:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        steer_vector_request: Sequence[SteerVectorRequest] | SteerVectorRequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
+        seq_steer_vector_requests = self._steer_vector_request_to_seq(steer_vector_request, len(seq_prompts))
         seq_priority = self._priority_to_seq(priority, len(prompts))
 
         return self._render_and_add_requests(
@@ -1647,6 +1670,7 @@ class LLM:
             ),
             params=seq_params,
             lora_requests=seq_lora_requests,
+            steer_vector_requests=seq_steer_vector_requests,
             priorities=seq_priority,
         )
 
@@ -1660,6 +1684,7 @@ class LLM:
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        steer_vector_request: Sequence[SteerVectorRequest] | SteerVectorRequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
@@ -1668,6 +1693,7 @@ class LLM:
             params=params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
+            steer_vector_request=steer_vector_request,
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
         )
@@ -1757,6 +1783,7 @@ class LLM:
         params: Sequence[SamplingParams | PoolingParams],
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
+        steer_vector_requests: Sequence[SteerVectorRequest | None] | None = None,
         priorities: Sequence[int] | None = None,
     ) -> list[str]:
         added_request_ids: list[str] = []
@@ -1770,6 +1797,7 @@ class LLM:
                         prompt,
                         None if lora_requests is None else lora_requests[i],
                     ),
+                    steer_vector_request=None if steer_vector_requests is None else steer_vector_requests[i],
                     priority=0 if priorities is None else priorities[i],
                 )
                 added_request_ids.append(request_id)
@@ -1785,6 +1813,7 @@ class LLM:
         prompt: EngineInput,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
+        steer_vector_request: SteerVectorRequest | None = None,
         priority: int = 0,
     ) -> str:
         if isinstance(params, SamplingParams):
@@ -1798,6 +1827,7 @@ class LLM:
             prompt,
             params,
             lora_request=lora_request,
+            steer_vector_request=steer_vector_request,
             priority=priority,
         )
 
