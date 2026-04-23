@@ -5,12 +5,11 @@ import math
 from collections.abc import Callable
 from typing import TypeVar
 
-import regex as re
 import torch
 from torch import nn
 
 from vllm.config import VllmConfig
-from vllm.config.lora import LoRAConfig, ModelConfig
+from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
@@ -25,19 +24,24 @@ from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,
+    is_in_target_modules,
     is_moe_model,
+    is_supported_lora_module,
     process_packed_modules_mapping,
     replace_submodule,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.models import SupportsLoRA, supports_multimodal
-from vllm.model_executor.models.interfaces import is_pooling_model
+from vllm.model_executor.models import (
+    SupportsLoRA,
+    is_pooling_model,
+    supports_multimodal,
+)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.v1.worker.utils import MultiModalBudget
 
 logger = init_logger(__name__)
 
@@ -104,7 +108,9 @@ class LoRAModelManager:
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
-        self._is_3d_moe_model = is_moe_model(self.model) and self.model.is_3d_moe_weight
+        is_moe = is_moe_model(self.model)
+        self._is_3d_moe_model = is_moe and self.model.is_3d_moe_weight
+        self._is_non_gated_moe = is_moe and self.model.is_non_gated_moe
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
 
@@ -140,7 +146,6 @@ class LoRAModelManager:
         vllm_config: VllmConfig,
         max_num_batched_tokens: int,
     ) -> None:
-        model_config: ModelConfig = vllm_config.model_config
         mm_registry = MULTIMODAL_REGISTRY
 
         self.supports_tower_connector_lora = False
@@ -156,15 +161,47 @@ class LoRAModelManager:
             device=self.device,
             lora_config=self.lora_config,
         )
+
         lm_prefix = self.mm_mapping.language_model[0]
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
 
-        if self.lora_config.enable_tower_connector_lora:
-            self.mm_processor_info = mm_registry.create_processor(model_config).info
-            self.supports_tower_connector_lora = self.supports_mm and hasattr(
-                self.model, "get_num_mm_encoder_tokens"
-            )
+        # First, determine if the model supports tower connector LoRA.
+        self.supports_tower_connector_lora = self.supports_mm and hasattr(
+            self.model, "get_num_mm_encoder_tokens"
+        )
+
+        # Then, handle the case where the feature is disabled in the config.
+        if not self.lora_config.enable_tower_connector_lora:
+            if self.supports_tower_connector_lora:
+                logger.info(
+                    "%s supports adding LoRA to the tower modules. If needed, "
+                    "please set `enable_tower_connector_lora=True`.",
+                    self.model.__class__.__name__,
+                )
+            self.supports_tower_connector_lora = False
+            return
+
+        # After this point, the feature is enabled in the config.
+        # Now check if it's supported by the model.
         if not self.supports_tower_connector_lora:
+            # Enabled but not supported: log warning and return.
+            logger.warning(
+                "LoRA with tower connector is enabled, but the model %s "
+                "does not support it. This will be ignored.",
+                self.model.__class__.__name__,
+            )
+            return
+
+        # Check if initialize the language model only.
+        if (
+            vllm_config.model_config.multimodal_config
+            and vllm_config.model_config.multimodal_config.language_model_only
+        ):
+            logger.warning(
+                "Disabling `enable_tower_connector_lora` because the multimodal "
+                "model is configured to initialize the language model only."
+            )
+            self.supports_tower_connector_lora = False
             return
 
         logger.warning(
@@ -174,9 +211,7 @@ class LoRAModelManager:
         )
 
         mm_budget = MultiModalBudget(vllm_config, mm_registry)
-        limit_per_prompt: int = max(
-            self.mm_processor_info.get_allowed_mm_limits().values()
-        )
+        limit_per_prompt = max(mm_budget.mm_max_items_per_prompt.values())
         num_encoder_tokens = self.model.get_num_mm_encoder_tokens(
             mm_budget.get_encoder_budget()
         )
@@ -255,6 +290,9 @@ class LoRAModelManager:
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 module.reset_lora(index)
+                logger.debug(
+                    "No LoRA weights found for module %s, skipping.", module_name
+                )
                 continue
 
             module.set_lora(
@@ -262,7 +300,7 @@ class LoRAModelManager:
                 module_lora.lora_a,
                 module_lora.lora_b,
             )
-
+            logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -332,10 +370,24 @@ class LoRAModelManager:
             punica_wrapper = self._get_punica_wrapper(module_name)
             if punica_wrapper is None:
                 logger.warning(
-                    "Regarding %s, vLLM currently only supports adding LoRA to"
-                    " language model, %s will be ignored.",
+                    "Regarding %s, no matching PunicaWrapper "
+                    "is found; %s will be ignored.",
                     self.model.__class__.__name__,
                     module_name,
+                )
+                continue
+
+            # TODO: Remove this restriction
+            # peft error when generating LoRA adapter with "gate" module:
+            # "Target module NemotronHTopkRouter() is not supported."
+            # Working LoRA adapter was created using peft with:
+            # LoraConfig(target_modules="all-linear", ...)
+            if self._is_non_gated_moe and module_name.endswith("mixer.gate"):
+                logger.debug_once(
+                    "LoRA is not supported for non-gated MoE gate module."
+                    " %s will be ignored.",
+                    module_name,
+                    scope="local",
                 )
                 continue
 
@@ -405,6 +457,22 @@ class LoRAModelManager:
         )
         self.modules[module_name] = module
 
+    @staticmethod
+    def _pad_lora_pairs_to_triplets(
+        loras: list[LoRALayerWeights | None],
+    ) -> list[LoRALayerWeights | None]:
+        """Pad LoRA weight pairs to triplets for non-gated MoE.
+
+        For non-gated MoE, each expert has 2 entries (w1, w2) that need to be
+        padded to triplets (w1, w2, None) to match pack_moe expectations.
+        """
+        assert len(loras) % 2 == 0, "Expected pairs of LoRA weights for non-gated MoE."
+        padded: list[LoRALayerWeights | None] = []
+        for i in range(0, len(loras), 2):
+            padded.extend(loras[i : i + 2])
+            padded.append(None)
+        return padded
+
     def create_dummy_lora(
         self,
         lora_id: int,
@@ -424,16 +492,23 @@ class LoRAModelManager:
             if module_name not in self.packed_modules:
                 assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
-                    input_dim = (
-                        module.base_layer.org_vocab_size
-                        if hasattr(module.base_layer, "org_vocab_size")
-                        else module.base_layer.weight.shape[1]
-                    )
-                    output_dim = (
-                        module.base_layer.embedding_dim
-                        if hasattr(module.base_layer, "embedding_dim")
-                        else module.base_layer.weight.shape[0]
-                    )
+                    # Special-case lm_head: wrapped by LogitsProcessorWithLoRA.
+                    # LoRA input dim is hidden_size, output dim is vocab size.
+                    # LogitsProcessorWithLoRA handles extra vocab size directly.
+                    if parts[-1] == "lm_head":
+                        input_dim = module.lora_a_stacked[0].shape[-1]
+                        output_dim = module.lora_b_stacked[0].shape[-2]
+                    else:
+                        input_dim = (
+                            module.base_layer.org_vocab_size
+                            if hasattr(module.base_layer, "org_vocab_size")
+                            else module.base_layer.weight.shape[1]
+                        )
+                        output_dim = (
+                            module.base_layer.embedding_dim
+                            if hasattr(module.base_layer, "embedding_dim")
+                            else module.base_layer.weight.shape[0]
+                        )
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,
@@ -491,20 +566,35 @@ class LoRAModelManager:
                     )
                     subloras.append(lora)
                 if module.__class__.__name__ == "FusedMoEWithLoRA":
-                    lora = PackedLoRALayerWeights.pack_moe(subloras, module_name)
+                    # For non-gated MoE, pad subloras to 3 elements per expert
+                    # to match pack_moe expectations (w1, w2, None for w3)
+                    if self._is_non_gated_moe and len(subloras) > 0:
+                        subloras = self._pad_lora_pairs_to_triplets(subloras)
+                    lora = PackedLoRALayerWeights.pack_moe(
+                        subloras, module_name, is_non_gated_moe=self._is_non_gated_moe
+                    )
                 else:
                     lora = PackedLoRALayerWeights.pack(subloras)
                 model.loras[module_name] = lora
         return model
 
-    def _match_target_modules(self, module_name: str):
-        return any(
-            re.match(
-                r".*\.{target_module}$".format(target_module=target_module), module_name
-            )
-            or target_module == module_name
-            for target_module in self.supported_lora_modules
-        )
+    def _match_target_modules(self, module_name: str) -> bool:
+        """Check if a module should have LoRA applied.
+
+        This method first checks if the module is in vLLM's supported LoRA
+        modules, then applies deployment-time restrictions based on
+        LoRAConfig.target_modules.
+
+        Args:
+            module_name: Full dot-separated module name (e.g.,
+                "model.layers.0.self_attn.o_proj")
+
+        Returns:
+            True if LoRA should be applied to this module, False otherwise.
+        """
+        if not is_supported_lora_module(module_name, self.supported_lora_modules):
+            return False
+        return is_in_target_modules(module_name, self.lora_config.target_modules)
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """
@@ -555,12 +645,18 @@ class LoRAModelManager:
                 replacement_loras[i] = None
             # HACK Temporary solution for the pool model.
             if self.is_pooling_model and not lora_model.check_lora_name(module_name):
-                replaced_module_name = module_name.replace("model.", "")
-                if lora_model.check_lora_name(module_name):
+                replaced_module_name = module_name.removeprefix("model.")
+                if lora_model.check_lora_name(replaced_module_name):
                     module_name = replaced_module_name
             if module_name.endswith(".experts"):
+                if self._is_non_gated_moe and len(replacement_loras) > 0:
+                    replacement_loras = self._pad_lora_pairs_to_triplets(
+                        replacement_loras
+                    )
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack_moe(
-                    replacement_loras, module_name
+                    replacement_loras,
+                    module_name,
+                    is_non_gated_moe=self._is_non_gated_moe,
                 )
             else:
                 lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
@@ -695,7 +791,7 @@ class LoRAModelManager:
         if self.is_pooling_model and not lora_model.check_lora_name(module_name):
             # If it's a pool model, and the layer name is not found,
             # remove the prefix 'model.' and search again.
-            module_name = module_name.replace("model.", "")
+            module_name = module_name.removeprefix("model.")
             if lora_model.check_lora_name(module_name):
                 org_module_name = module_name
                 logger.info_once(

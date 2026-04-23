@@ -406,10 +406,11 @@ def test_run_eviction_cycle_applies_absolute_offset():
     tokenizer = make_mock_tokenizer()
     orc = make_orchestrator(params=params, engine_client=engine_client, tokenizer=tokenizer)
 
-    # Set up state: 32 tokens worth of norms, offset=100
-    orc.accumulated_l2_norms = [float(i) for i in range(32)]  # 32 norms
+    # Set up state: 37 tokens worth of norms, offset=5
+    # norms[5:] = 32 norms available to the strategy
+    orc.accumulated_l2_norms = [float(i) for i in range(37)]  # 37 norms
     orc.reasoning_content = "Reasoning " * 3
-    orc.reasoning_start_token_offset = 100  # absolute offset
+    orc.reasoning_start_token_offset = 5  # absolute offset
     orc._generation_finished = False
 
     asyncio.run(orc._run_eviction_cycle())
@@ -421,9 +422,9 @@ def test_run_eviction_cycle_applies_absolute_offset():
     absolute_ranges = call_args[0][1]
 
     assert request_id_arg == "req-test"
-    # All ranges must be offset by 100
+    # All ranges must be offset by 5
     for start, end in absolute_ranges:
-        assert start >= 100, f"Range start {start} is not offset by 100"
+        assert start >= 5, f"Range start {start} is not offset by 5"
         assert end > start
 
 

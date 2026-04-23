@@ -10,7 +10,7 @@ Coverage:
 """
 
 import inspect
-import re
+import regex as re
 
 
 # ---------------------------------------------------------------------------

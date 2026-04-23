@@ -7,11 +7,14 @@ Covers:
 Requirements: GUARD-01, GUARD-02
 """
 
+import pathlib
 import sys
 import unittest
 
 import msgspec
 import torch
+
+_repo_root = pathlib.Path(__file__).resolve().parents[2]
 
 
 class TestSamplingParamsEnableL2Norms(unittest.TestCase):
@@ -44,9 +47,9 @@ class TestUpdateNormsBatchEvictionFilter(unittest.TestCase):
     """update_norms_batch eviction_request_ids filter — GUARD-01 inner loop."""
 
     def _reset_cache(self):
-        from vllm.v1.attention.l2_norm_cache import L2NormCache
-        L2NormCache._instance = None
-        return L2NormCache()
+        import vllm.v1.attention.l2_norm_cache as cache_mod
+        cache_mod._l2_norm_cache = None
+        return cache_mod.get_l2_norm_cache()
 
     def _make_tensors(self, num_requests: int = 1, seq_len: int = 4,
                       block_size: int = 4, num_blocks: int = 2):
@@ -141,10 +144,7 @@ class TestSchedulerGuardSource(unittest.TestCase):
 
     def test_scheduler_uses_sampling_params_guard(self):
         """Scheduler norm fetch is gated on request.sampling_params.enable_l2_norms."""
-        import pathlib
-        src = pathlib.Path(
-            "/export/home2/broc/vllm-thought-eviction/vllm/v1/core/sched/scheduler.py"
-        ).read_text()
+        src = (_repo_root / "vllm/v1/core/sched/scheduler.py").read_text()
         self.assertIn(
             "sampling_params.enable_l2_norms",
             src,
@@ -153,10 +153,7 @@ class TestSchedulerGuardSource(unittest.TestCase):
 
     def test_scheduler_no_singleton_guard(self):
         """Scheduler must not use the old cross-process is_eviction_active singleton guard."""
-        import pathlib
-        src = pathlib.Path(
-            "/export/home2/broc/vllm-thought-eviction/vllm/v1/core/sched/scheduler.py"
-        ).read_text()
+        src = (_repo_root / "vllm/v1/core/sched/scheduler.py").read_text()
         self.assertNotIn(
             "is_eviction_active",
             src,
@@ -168,10 +165,7 @@ class TestGpuModelRunnerGuardSource(unittest.TestCase):
     """gpu_model_runner uses enable_l2_norms at all three guard sites (source inspection)."""
 
     def _read_gmr(self):
-        import pathlib
-        return pathlib.Path(
-            "/export/home2/broc/vllm-thought-eviction/vllm/v1/worker/gpu_model_runner.py"
-        ).read_text()
+        return (_repo_root / "vllm/v1/worker/gpu_model_runner.py").read_text()
 
     def test_gpu_model_runner_has_enable_l2_norms_at_three_sites(self):
         """enable_l2_norms appears at attn_metadata build, forward-pass call site, and

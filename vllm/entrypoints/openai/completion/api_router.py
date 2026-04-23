@@ -49,15 +49,9 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
     )
     handler = completion(raw_request)
     if handler is None:
-        base_server = raw_request.app.state.openai_serving_tokenization
-        return base_server.create_error_response(
-            message="The model does not support Completions API"
-        )
+        raise NotImplementedError("The model does not support Completions API")
 
-    try:
-        generator = await handler.create_completion(request, raw_request)
-    except Exception as e:
-        return handler.create_error_response(e)
+    generator = await handler.create_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

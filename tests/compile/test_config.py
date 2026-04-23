@@ -2,14 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from contextlib import nullcontext
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.config import CompilationConfig, CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
+)
+from vllm.config import (
+    CompilationConfig,
+    CUDAGraphMode,
+    ParallelConfig,
+    SchedulerConfig,
+    VllmConfig,
+)
 from vllm.config.compilation import CompilationMode, PassConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -17,6 +26,7 @@ from vllm.utils.torch_utils import (
     _is_torch_equal_or_newer,
     is_torch_equal,
 )
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -206,12 +216,14 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            splitting_ops=["vllm::unified_attention"],
+            splitting_ops=["vllm::unified_attention_with_output"],
         )
     )
     # with inductor partition we use splitting_ops directly for
     # partition rules
-    assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
+    assert config.compilation_config.splitting_ops == [
+        "vllm::unified_attention_with_output"
+    ]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(
@@ -271,7 +283,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
             splitting_ops=[
-                "vllm::unified_attention",
+                "vllm::unified_attention_with_output",
                 "vllm::moe_forward",
                 "vllm::moe_forward_shared",
             ],
@@ -279,7 +291,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     )
     splitting_ops = config.compilation_config.splitting_ops
     assert splitting_ops == [
-        "vllm::unified_attention",
+        "vllm::unified_attention_with_output",
         "vllm::moe_forward",
         "vllm::moe_forward_shared",
     ]
@@ -402,18 +414,23 @@ def test_cudagraph_sizes_post_init(
 
     with (
         ctx,
-        patch("vllm.config.parallel.cuda_device_count_stateless", return_value=tp_size),
+        patch.object(current_platform, "device_count", return_value=tp_size),
     ):
+        kwargs = {}
+        if cudagraph_capture_sizes is not None:
+            kwargs["cudagraph_capture_sizes"] = cudagraph_capture_sizes
+        if max_cudagraph_capture_size is not None:
+            kwargs["max_cudagraph_capture_size"] = max_cudagraph_capture_size
         compilation_config = CompilationConfig(
-            cudagraph_capture_sizes=cudagraph_capture_sizes,
-            max_cudagraph_capture_size=max_cudagraph_capture_size,
             pass_config=PassConfig(
                 enable_sp=enable_sp,
                 fuse_norm_quant=True,
                 fuse_act_quant=True,
                 eliminate_noops=True,
+                sp_min_token_num=512 if enable_sp else None,
             ),
             cudagraph_mode=cudagraph_mode,
+            **kwargs,
         )
         engine_args = EngineArgs(
             model="facebook/opt-125m",
@@ -472,6 +489,19 @@ def test_cached_compilation_config(default_vllm_config):
     assert "torch.ops._C.static_scaled_fp8_quant.default(" in code
 
 
+def _create_vllm_config_for_validation(
+    compilation_config: CompilationConfig,
+) -> MagicMock:
+    """Helper to create a mock VllmConfig for padding validation testing."""
+    mock_config = MagicMock(spec=VllmConfig)
+    mock_config.compilation_config = compilation_config
+    mock_config.scheduler_config = SchedulerConfig.default_factory(max_num_seqs=8)
+    mock_config.parallel_config = ParallelConfig()
+    mock_config.speculative_config = None
+    mock_config.lora_config = None
+    return mock_config
+
+
 def test_compile_sizes_padding_validation():
     """Test that compile_sizes with values that would be padded raises an error."""
     # cudagraph_capture_sizes=[1, 2, 4, 8] means:
@@ -488,29 +518,39 @@ def test_compile_sizes_padding_validation():
             cudagraph_capture_sizes=[1, 2, 4, 8],
             max_cudagraph_capture_size=8,
             compile_sizes=[3],
+            cudagraph_mode=CUDAGraphMode.FULL,
         )
         config.post_init_cudagraph_sizes()
+        dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
+        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
 
     with pytest.raises(ValueError, match="would be padded to"):
         config = CompilationConfig(
             cudagraph_capture_sizes=[1, 2, 4, 8],
             max_cudagraph_capture_size=8,
             compile_sizes=[5],
+            cudagraph_mode=CUDAGraphMode.FULL,
         )
         config.post_init_cudagraph_sizes()
+        dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
+        dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)
 
     config = CompilationConfig(
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_cudagraph_capture_size=8,
         compile_sizes=[1, 2, 4, 8],
+        cudagraph_mode=CUDAGraphMode.FULL,
     )
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [1, 2, 4, 8]
+    dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.FULL)  # Should not raise
 
     config = CompilationConfig(
         cudagraph_capture_sizes=[1, 2, 4, 8],
         max_cudagraph_capture_size=8,
         compile_sizes=["cudagraph_capture_sizes"],
+        cudagraph_mode=CUDAGraphMode.FULL,
     )
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [1, 2, 4, 8]
@@ -535,3 +575,60 @@ def test_compile_sizes_padding_validation():
     )
     config.post_init_cudagraph_sizes()
     assert sorted(config.compile_sizes) == [3, 5, 7]
+    dispatcher = CudagraphDispatcher(_create_vllm_config_for_validation(config))
+    dispatcher.initialize_cudagraph_keys(CUDAGraphMode.NONE)  # Should not raise
+
+
+def test_inductor_asserts_default_disabled(monkeypatch):
+    """Test that inductor runtime asserts are disabled by default
+    (INFO logging level) on torch < 2.12."""
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
+
+    import importlib
+
+    import vllm.envs
+
+    importlib.reload(vllm.envs)
+
+    config = CompilationConfig()
+    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
+        assert config.inductor_compile_config.get("size_asserts") is False
+        assert config.inductor_compile_config.get("alignment_asserts") is False
+        assert config.inductor_compile_config.get("scalar_asserts") is False
+
+
+def test_inductor_asserts_enabled_in_debug(monkeypatch):
+    """Test that VLLM_LOGGING_LEVEL=DEBUG enables inductor runtime asserts
+    on torch < 2.12."""
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "DEBUG")
+
+    import importlib
+
+    import vllm.envs
+
+    importlib.reload(vllm.envs)
+
+    config = CompilationConfig()
+    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
+        assert config.inductor_compile_config.get("size_asserts") is True
+        assert config.inductor_compile_config.get("alignment_asserts") is True
+        assert config.inductor_compile_config.get("scalar_asserts") is True
+
+
+def test_inductor_asserts_user_override(monkeypatch):
+    """Test that explicit inductor_compile_config overrides the
+    debug-logging default."""
+    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "INFO")
+
+    import importlib
+
+    import vllm.envs
+
+    importlib.reload(vllm.envs)
+
+    config = CompilationConfig(
+        inductor_compile_config={"size_asserts": True},
+    )
+    assert config.inductor_compile_config.get("size_asserts") is True
+    if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
+        assert config.inductor_compile_config.get("alignment_asserts") is False

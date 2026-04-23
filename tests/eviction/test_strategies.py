@@ -110,7 +110,6 @@ def test_global_strategy_evicts_highest_norms():
     ranges = strategy.compute_evictable_ranges(
         l2_norms=norms,
         keep_ratio=0.5,
-        prune_after_tokens=1,
     )
 
     # Collect all evicted indices from ranges
@@ -125,16 +124,26 @@ def test_global_strategy_evicts_highest_norms():
     assert evicted_indices == {0, 8, 4, 6, 2}, f"Expected highest 5 norms evicted, got {evicted_indices}"
 
 
-def test_global_strategy_below_prune_threshold_returns_empty():
-    """Test 2: len(l2_norms) < prune_after_tokens returns []."""
+def test_global_strategy_evicts_with_small_norms_array():
+    """Test 2: GlobalStrategy evicts highest norms even on small arrays.
+
+    The prune_after_tokens gate is enforced by the orchestrator, not
+    GlobalStrategy itself. With keep_ratio=0.5 and 3 norms, GlobalStrategy
+    keeps int(0.5 * 3) = 1 token (lowest norm) and evicts the remaining 2.
+    """
     strategy = GlobalStrategy()
     norms = np.array([0.1, 0.2, 0.3])
     ranges = strategy.compute_evictable_ranges(
         l2_norms=norms,
         keep_ratio=0.5,
-        prune_after_tokens=10,
     )
-    assert ranges == []
+    # With 3 norms and keep_ratio=0.5: keep 1 token (lowest norm=0.1 at idx 0),
+    # evict indices 1,2 → range (1, 3)
+    evicted_indices = set()
+    for start, end in ranges:
+        evicted_indices.update(range(start, end))
+    assert 0 not in evicted_indices, "Lowest norm token should be kept"
+    assert 1 in evicted_indices and 2 in evicted_indices, "Higher norm tokens should be evicted"
 
 
 def test_global_strategy_keep_all_returns_empty():
@@ -144,7 +153,6 @@ def test_global_strategy_keep_all_returns_empty():
     ranges = strategy.compute_evictable_ranges(
         l2_norms=norms,
         keep_ratio=1.0,
-        prune_after_tokens=1,
     )
     assert ranges == []
 
@@ -156,7 +164,6 @@ def test_global_strategy_ranges_are_reasoning_relative():
     ranges = strategy.compute_evictable_ranges(
         l2_norms=norms,
         keep_ratio=0.5,
-        prune_after_tokens=1,
     )
     # All range values should be within [0, len(norms)]
     for start, end in ranges:

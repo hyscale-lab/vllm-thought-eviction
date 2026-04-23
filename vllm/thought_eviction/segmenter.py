@@ -10,7 +10,7 @@ are computed using offset_mapping from the tokenizer and are relative to the
 start of the reasoning content (not absolute sequence positions).
 """
 
-import re
+import regex as re
 from dataclasses import dataclass, field
 from typing import Optional
 

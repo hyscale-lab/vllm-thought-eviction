@@ -1,0 +1,4 @@
+# Pre-merge reference commit
+# Use: git show <hash>:path/to/file to see eviction code removed by Pattern B resolution
+# Needed by: Phase 3 (scheduler, gpu_model_runner), Phase 4 (serving)
+2ec9a65e84b737a33892c58e69d2ee4a7ccddd55
