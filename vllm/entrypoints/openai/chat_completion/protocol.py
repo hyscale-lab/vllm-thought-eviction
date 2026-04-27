@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
 )
+from vllm.agent_tracker.protocol import AgentTrackerParams
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -361,6 +362,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
     eviction_params: EvictionParams | None = Field(
         default=None,
         description="Server-side KV cache eviction parameters for reasoning models.",
+    )
+    agent_tracker: AgentTrackerParams | None = Field(
+        default=None,
+        description=(
+            "Live trajectory tracker session params (Phase 01.4). When set, "
+            "the server maintains per-session eviction-opportunity state. "
+            "Independent of eviction_params; setting only agent_tracker does "
+            "NOT enable real eviction."
+        ),
     )
 
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
