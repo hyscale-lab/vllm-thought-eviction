@@ -1,0 +1,65 @@
+"""TurnState dataclass and EvictableSegmentMap (D-07, second indexed view).
+
+TurnState is ported from `scripts/trajectory_classifier.py:109-126` and augmented
+with three new fields (msg_range, token_range, obs_token_hash) per RESEARCH
+section 5. EvictableSegmentMap is the primary opportunity map Phase 2 will read.
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class TurnState:
+    """Per-turn state. Mirrors `scripts.trajectory_classifier.TurnState` plus
+    three new fields needed by the live tracker (D-07/D-11)."""
+    turn_idx: int
+    category: str
+    files_referenced: set[str] = field(default_factory=set)
+    files_referenced_full: set[str] = field(default_factory=set)
+    command: str | None = None
+    is_edit: bool = False
+    is_success: bool = True
+    token_count: int = 0
+    observation_tokens: int = 0
+    reasoning_tokens: int = 0
+    tool_call_tokens: int = 0
+    other_tokens: int = 0
+    evictable: bool = False
+    eviction_reason: str = "essential"
+    superseded_by: int | None = None
+    # NEW for live tracker (RESEARCH section 5):
+    msg_range: tuple[int, int] = (0, 0)        # [start_msg_idx, end_msg_idx)
+    token_range: tuple[int, int] = (0, 0)      # [start_token_idx, end_token_idx)
+    obs_token_hash: bytes | None = None        # blake2b digest of observation tokens (D-11)
+
+
+class EvictableSegmentMap:
+    """`turn_idx -> TurnState` view (D-07).
+
+    Thin wrapper around a `list[TurnState]` indexed by turn_idx. The
+    SessionTracker mutates `evictable`, `eviction_reason`, `superseded_by`
+    on existing entries when new evidence arrives (D-08).
+    """
+
+    def __init__(self) -> None:
+        self._turns: list[TurnState] = []
+
+    def __len__(self) -> int:
+        return len(self._turns)
+
+    def __iter__(self):
+        return iter(self._turns)
+
+    def __getitem__(self, turn_idx: int) -> TurnState:
+        return self._turns[turn_idx]
+
+    def append(self, ts: TurnState) -> None:
+        assert ts.turn_idx == len(self._turns), (
+            f"TurnState.turn_idx={ts.turn_idx} must equal next slot "
+            f"{len(self._turns)}"
+        )
+        self._turns.append(ts)
+
+    def all_turns(self) -> list[TurnState]:
+        return self._turns
