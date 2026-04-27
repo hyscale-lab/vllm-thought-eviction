@@ -253,6 +253,11 @@ def build_app(
 
         register_generative_scoring_api_router(app)
 
+    from vllm.entrypoints.openai.agent_tracker.api_router import (
+        attach_router as attach_agent_tracker_router,
+    )
+    attach_agent_tracker_router(app)
+
     app.root_path = args.root_path
 
     from vllm.entrypoints.openai.extensions.attention_tools import router as attention_router
@@ -397,6 +402,12 @@ async def init_app_state(
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
+    )
+
+    from vllm.agent_tracker.tracker import SessionTrackerRegistry
+    state.session_tracker_registry = SessionTrackerRegistry(
+        idle_timeout_seconds=getattr(args, "agent_tracker_idle_timeout_min", 30) * 60,
+        max_sessions=getattr(args, "agent_tracker_max_sessions", 1000),
     )
 
     if "generate" in supported_tasks:
