@@ -358,6 +358,26 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
+    parser.add_argument(
+        "--agent-tracker-idle-timeout-min",
+        type=int,
+        default=30,
+        help=(
+            "Phase 01.4 agent tracker: idle timeout (minutes) before a session "
+            "is LRU-evicted. Default 30."
+        ),
+    )
+    parser.add_argument(
+        "--agent-tracker-max-sessions",
+        type=int,
+        default=1000,
+        help=(
+            "Phase 01.4 agent tracker: maximum concurrent tracked sessions. "
+            "Oldest idle session is LRU-evicted when the cap is hit. "
+            "Default 1000."
+        ),
+    )
+
     return parser
 
 
