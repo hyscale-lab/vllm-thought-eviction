@@ -79,6 +79,10 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from vllm.thought_eviction.orchestrator import EvictionOrchestrator
+from vllm.agent_tracker.tracker import (
+    compute_message_token_ranges,
+    get_session_tracker_registry,
+)
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -234,6 +238,39 @@ class OpenAIServingChat(OpenAIServing):
             return result
 
         conversation, engine_inputs = result
+
+        # NEW: Phase 01.4 agent tracker hook (D-02, D-03, D-05).
+        # Sync inline. Independent of EvictionOrchestrator path.
+        if request.agent_tracker is not None and request.agent_tracker.enabled:
+            try:
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_inputs[0]
+                ).token_ids
+                msg_token_ranges = compute_message_token_ranges(
+                    messages=request.messages,
+                    tokenizer=tokenizer,
+                    request=request,
+                    chat_template=self.chat_template,
+                    chat_template_content_format=self.chat_template_content_format,
+                    default_chat_template_kwargs=self.default_chat_template_kwargs,
+                )
+                registry = (
+                    getattr(raw_request.app.state, "session_tracker_registry", None)
+                    if raw_request is not None else None
+                )
+                if registry is None:
+                    registry = get_session_tracker_registry()
+                registry.observe_request(
+                    session_id=request.agent_tracker.session_id,
+                    structured_messages=request.messages,
+                    prompt_token_ids=prompt_token_ids,
+                    message_token_ranges=msg_token_ranges,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "agent_tracker observe failed for session %s: %s",
+                    request.agent_tracker.session_id, exc,
+                )
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
