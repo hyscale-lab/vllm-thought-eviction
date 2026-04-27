@@ -8,7 +8,7 @@ incrementally instead of the offline batch loop in `classify_conversation`.
 
 NO-EVICT ZONE (D-10): the live tracker computes the no-evict zone DYNAMICALLY
 per session at session start (sum of leading system + first user message
-token ranges). The legacy NO_EVICT_ZONE_P95 = 1991 constant from
+token ranges). The legacy 1,991-token p95 constant from
 scripts/eviction_analysis.py is intentionally NOT ported here -- it remains
 only in the offline curve script. K_DEFAULTS is the only constant lifted
 from eviction_analysis.py.
@@ -32,10 +32,11 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 # E-spec K-window defaults (ported from scripts/eviction_analysis.py:51-60).
 #
-# NOTE: NO_EVICT_ZONE_P95 = 1991 is INTENTIONALLY NOT ported here. The live
-# tracker computes the no-evict zone DYNAMICALLY per session per D-10 (sum of
-# token-range lengths of leading system + first user messages). The legacy
-# constant remains only in scripts/eviction_analysis.py for offline curve work.
+# NOTE: the legacy 1,991-token p95 no-evict-zone constant is INTENTIONALLY
+# NOT ported here. The live tracker computes the no-evict zone DYNAMICALLY
+# per session per D-10 (sum of token-range lengths of leading system + first
+# user messages). The legacy constant remains only in
+# scripts/eviction_analysis.py for offline curve work.
 # ---------------------------------------------------------------------------
 
 # MSA category constants are defined below; K_DEFAULTS uses them as keys.
