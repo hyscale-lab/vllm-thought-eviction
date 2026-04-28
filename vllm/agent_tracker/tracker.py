@@ -234,6 +234,8 @@ def compute_message_token_ranges(
     chat_template_content_format: str,
     default_chat_template_kwargs: dict,
     tools: list[dict] | None = None,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
 ) -> list[tuple[int, int]]:
     """Per-message token ranges via incremental re-tokenization (RESEARCH Finding 7).
 
@@ -285,6 +287,17 @@ def compute_message_token_ranges(
     standalone render, but the tools preamble is emitted unconditionally
     when tools is not none, so the probe length already includes the
     tools-preamble overhead and naturally cancels out via subtraction).
+
+    ADD_GENERATION_PROMPT (debug session Round 3, 2026-04-28): the engine
+    renders prompt_token_ids with request.add_generation_prompt (default
+    True), which appends `<|im_start|>assistant\\n<think>\\n` (5 tokens on
+    Qwen3.6 with default enable_thinking) to the end. Tracker MUST mirror
+    this on the FINAL iteration so ranges[-1][1] absorbs the gen_prompt
+    overhead and equals len(prompt_token_ids) exactly. Earlier iterations
+    stay add_generation_prompt=False so the per-prefix increments measure
+    only the new message's contribution; the gen_prompt tokens are
+    attributed entirely to the last range (a tiny scaffolding bias that
+    keeps the cumulative sum exact).
     """
     # NORMALIZATION (a): coerce tool_call.arguments once on the full list.
     # Also materializes pydantic v2 lazy iterators so subsequent iteration
@@ -297,9 +310,15 @@ def compute_message_token_ranges(
         **default_chat_template_kwargs,
         **(getattr(request, "chat_template_kwargs", None) or {}),
     }
+    # Strip add_generation_prompt / continue_final_message from kwargs if
+    # present -- we set them per-iteration ourselves (see Round 3 docstring).
+    kwargs.pop("add_generation_prompt", None)
+    kwargs.pop("continue_final_message", None)
     effective_chat_template = (
         getattr(request, "chat_template", None) or chat_template
     )
+
+    n = len(norm_messages)
 
     # Compute placeholder overhead once. The placeholder user message is
     # rendered by the Qwen template body loop unconditionally as
@@ -312,11 +331,21 @@ def compute_message_token_ranges(
     #     render([system, placeholder_user], tools=T)  =  T_with_sys + P
     #     - probe (tools=None)                         =          - P
     #     = T_with_sys                                 =  natural render([system], tools=T)
+    # The probe MUST use add_generation_prompt=False to match the
+    # placeholder rendering inside non-final prefixes (final prefix always
+    # has a real user, so the placeholder branch never fires there).
     # Computed lazily (only once we see a prefix that needs it) to avoid
     # paying the probe cost for sessions that always have a user in messages[0].
     placeholder_overhead: int | None = None
 
-    for i in range(1, len(norm_messages) + 1):
+    for i in range(1, n + 1):
+        is_final = (i == n)
+        # Engine uses request.add_generation_prompt (default True) on the
+        # full conversation -- mirror that ONLY on the final iteration so
+        # the gen_prompt overhead lands in the last range (preserves
+        # cumulative-sum invariant).
+        iter_add_gen = add_generation_prompt if is_final else False
+        iter_continue_final = continue_final_message if is_final else False
         prefix = norm_messages[:i]
         if _prefix_has_user(prefix):
             rendered = tokenizer.apply_chat_template(
@@ -324,7 +353,8 @@ def compute_message_token_ranges(
                 chat_template=effective_chat_template,
                 tools=tools,
                 tokenize=True,
-                add_generation_prompt=False,
+                add_generation_prompt=iter_add_gen,
+                continue_final_message=iter_continue_final,
                 **kwargs,
             )
             cur_len = len(rendered)
@@ -332,6 +362,9 @@ def compute_message_token_ranges(
             if placeholder_overhead is None:
                 # Probe with tools=None -- isolates the placeholder user
                 # message's contribution (independent of tools-preamble).
+                # Always add_generation_prompt=False -- placeholder branch
+                # only fires for non-final prefixes (final always has a real
+                # user message in mini-swe-agent flow).
                 placeholder_overhead = len(tokenizer.apply_chat_template(
                     [dict(_PLACEHOLDER_USER_MSG)],
                     chat_template=effective_chat_template,
@@ -346,7 +379,8 @@ def compute_message_token_ranges(
                 chat_template=effective_chat_template,
                 tools=tools,
                 tokenize=True,
-                add_generation_prompt=False,
+                add_generation_prompt=iter_add_gen,
+                continue_final_message=iter_continue_final,
                 **kwargs,
             )
             cur_len = max(0, len(rendered) - placeholder_overhead)
@@ -471,14 +505,29 @@ class SessionTracker:
             )
         else:
             # If the leading prefix mutated, warn and keep the original.
+            # Tolerance: the FIRST request's no_evict_zone may include the
+            # add_generation_prompt scaffolding (~5 tokens for Qwen3.6) when
+            # the first user message is also the last message in that request
+            # -- subsequent requests don't include that scaffolding in the
+            # range ending the first user. The benign +/-10-token drift is
+            # purely from gen_prompt scaffolding, not actual content mutation;
+            # don't spam logs for it. (Round 3 follow-on, 2026-04-28.)
             rederived = self._compute_initial_no_evict_zone(
                 structured_messages, message_token_ranges,
             )
-            if rederived != self.no_evict_zone_tokens:
+            drift = abs(rederived - self.no_evict_zone_tokens)
+            if drift > 10:
                 logger.warning(
                     "agent_tracker: leading prompt mutated mid-session for "
                     "sid=%s; keeping original no-evict zone=%d (would have been %d)",
                     self.session_id, self.no_evict_zone_tokens, rederived,
+                )
+            elif drift > 0:
+                logger.debug(
+                    "agent_tracker: tiny no-evict zone drift for sid=%s "
+                    "(original=%d, rederived=%d, drift=%d <= 10 tokens, "
+                    "likely add_generation_prompt scaffolding)",
+                    self.session_id, self.no_evict_zone_tokens, rederived, drift,
                 )
 
         new_msgs_count = len(structured_messages) - self.prev_msg_count

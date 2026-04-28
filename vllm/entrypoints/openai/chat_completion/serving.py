@@ -234,6 +234,30 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
             )
+        # NEW: Phase 01.4 agent tracker -- pre-materialize messages BEFORE the
+        # engine's render_chat_request consumes the pydantic v2
+        # ValidatorIterator on assistant.tool_calls. The engine path internally
+        # calls parse_chat_messages, which iterates request.messages[i].tool_calls
+        # ONCE (the iterator is single-consumption / rust-backed). If the tracker
+        # tries to iterate the SAME iterator afterwards, it gets ZERO items and
+        # silently undercounts every assistant message by the entire tool_call
+        # body. Materializing here -- BEFORE the engine sees the iterator --
+        # gives both the tracker and the engine fresh list-of-dicts on every
+        # downstream attribute access. (Debug session
+        # agent-tracker-observe-no-user-query, Round 3 Bug A1.)
+        if request.agent_tracker is not None and request.agent_tracker.enabled:
+            try:
+                # In-place rebuild: replace each request.messages[i] with its
+                # materialized dict (tool_calls now a plain list-of-dicts).
+                # We keep the SAME outer list so downstream code that holds a
+                # reference (e.g., engine path) sees the rewritten contents.
+                request.messages[:] = materialize_messages(request.messages)
+            except Exception as exc:
+                logger.warning(
+                    "agent_tracker pre-materialize failed for session %s: %s",
+                    request.agent_tracker.session_id, exc,
+                )
+
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
@@ -247,16 +271,10 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_token_ids = self._extract_prompt_components(
                     engine_inputs[0]
                 ).token_ids
-                # Materialize messages ONCE here. pydantic v2 lazily validates
-                # tool_calls into a ValidatorIterator (rust-backed, not
-                # picklable, single-consumption). Pass the materialized list
-                # to BOTH compute_message_token_ranges AND
-                # SessionTrackerRegistry.observe_request -- never pass
-                # request.messages directly to either, otherwise downstream
-                # iteration will trip a `cannot pickle ValidatorIterator`
-                # error or get an exhausted iterator. (Debug session
-                # agent-tracker-observe-no-user-query, Issue 2.)
-                materialized_messages = materialize_messages(request.messages)
+                # request.messages is already materialized (see pre-materialize
+                # above). It's safe to read .messages directly here -- both the
+                # tracker compute and the registry consume the same plain dicts.
+                materialized_messages = list(request.messages)
                 # Mirror the engine's preprocess_chat: tool_dicts is
                 # `[t.model_dump() for t in request.tools]` or None. The Qwen
                 # jinja template's tools-preamble contributes ~tens-to-hundreds
@@ -268,6 +286,10 @@ class OpenAIServingChat(OpenAIServing):
                     tool_dicts: list[dict] | None = None
                 else:
                     tool_dicts = [t.model_dump() for t in request.tools]
+                # Round 3 Bug A2: thread add_generation_prompt /
+                # continue_final_message through so the FINAL prefix
+                # iteration absorbs the gen_prompt overhead and matches
+                # len(prompt_token_ids) exactly.
                 msg_token_ranges = compute_message_token_ranges(
                     messages=materialized_messages,
                     tokenizer=tokenizer,
@@ -276,6 +298,8 @@ class OpenAIServingChat(OpenAIServing):
                     chat_template_content_format=self.chat_template_content_format,
                     default_chat_template_kwargs=self.default_chat_template_kwargs,
                     tools=tool_dicts,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                 )
                 registry = (
                     getattr(raw_request.app.state, "session_tracker_registry", None)
