@@ -98,9 +98,18 @@ K_DEFAULTS["AGENT_TOOL_CALL"] = 0  # tool-call turns are segment anchors, never 
 # ---------------------------------------------------------------------------
 
 # Use non-capturing group for extension alternatives so findall returns the full match.
+#
+# URL-rejection guards (added 2026-04-28 per quick task 260428-w4j):
+#   - Negative lookbehind `(?<![/:\w])` on both alternatives rejects matches whose
+#     previous char is `:`, `/`, or word char. This kills URL-context fragments
+#     like `://`, `host/path`, and `:password` that previously polluted
+#     agent_tracker_live.json::file_timeline (e.g. `//foo`, `//userid`, `/pass`).
+#   - `(?:/|~/)` (instead of `[/~]`) requires `~` to be followed by `/` so that
+#     URL special-char strings like `http://-.~_!...@example.com` no longer
+#     yield bare `~_` matches. `~/foo` and `~/projects/x.py` still match.
 _FILE_PATH_RE = re.compile(
-    r'[/~][\w./\-]+'
-    r'|[\w./\-]+\.(?:py|js|ts|java|go|rb|sh|md|txt|json|yaml|yml|toml|cfg|conf|cpp|c|h)(?!\w)'
+    r'(?<![/:\w])(?:/|~/)[\w./\-]+'
+    r'|(?<![/:\w])[\w./\-]+\.(?:py|js|ts|java|go|rb|sh|md|txt|json|yaml|yml|toml|cfg|conf|cpp|c|h)(?!\w)'
 )
 
 # Tool names that carry bash/shell commands.
