@@ -573,6 +573,30 @@ class SessionTracker:
         # have at most ONE new turn-group per call (mirrors the JSONL row
         # structure that build_turn_states walks).
         if new_msgs_block:
+            # Retroactively trim the prior turn's token_range[1] to the
+            # scaffolding-free end of its boundary message. The prior
+            # request rendered that message as ITS final iteration (so the
+            # +5 add_generation_prompt suffix was absorbed into its end);
+            # this request renders the same message non-finally, exposing
+            # the natural end. Without this trim, persisted turn ranges
+            # overlap by ~5 tokens at every cross-request boundary.
+            if self.prev_msg_count > 0 and self.evictable_map:
+                prev_ts = self.evictable_map[-1]
+                natural_end = message_token_ranges[self.prev_msg_count - 1][1]
+                old_start, old_end = prev_ts.token_range
+                if natural_end < old_end:
+                    delta = old_end - natural_end
+                    prev_ts.token_range = (old_start, natural_end)
+                    prev_ts.token_count = max(0, prev_ts.token_count - delta)
+                    # Drain the trimmed tokens from whichever per-category
+                    # bucket they were attributed to (the "other" bucket is
+                    # the residual catch-all; fall through to it).
+                    for fld in ("observation_tokens", "reasoning_tokens",
+                                "tool_call_tokens", "other_tokens"):
+                        v = getattr(prev_ts, fld)
+                        if v >= delta:
+                            setattr(prev_ts, fld, v - delta)
+                            break
             cumulative_msg_idx = self.prev_msg_count
             group_end = len(structured_messages)
             msg_range = (cumulative_msg_idx, group_end)
