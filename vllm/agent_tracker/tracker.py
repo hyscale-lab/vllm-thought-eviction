@@ -53,14 +53,187 @@ logger = init_logger(__name__)
 # SECTION B -- compute_message_token_ranges helper (RESEARCH Finding 7)
 # =============================================================================
 
+# Chat-template compatibility shims. Mirrors
+# scripts/analyze_tokens.py:_normalize_messages_for_chat_template, which solved
+# the same two issues during offline prefix-overlap analysis:
+#   (1) tool_call.arguments arrives as a JSON string from litellm, but the
+#       Qwen jinja template iterates it with `.items()` and raises
+#       `TypeError: Can only get item pairs from a mapping.` unless we coerce
+#       to a dict first.
+#   (2) When apply_chat_template is fed a sub-list with no non-tool-response
+#       user message, the template raises `No user query found in messages.`
+#       at the `last_query_index` check (chat_template.jinja:67-80). Inject a
+#       placeholder user message just after any leading system block so the
+#       check succeeds; the placeholder's contribution is subtracted out
+#       afterwards to keep cumulative ranges aligned with the natural full
+#       render.
+
+_PLACEHOLDER_USER_CONTENT = "[placeholder for incremental rendering]"
+_PLACEHOLDER_USER_MSG = {"role": "user", "content": _PLACEHOLDER_USER_CONTENT}
+
+
+def _materialize_message(msg: Any) -> dict:
+    """Return a plain dict copy of one message, eagerly materializing any
+    pydantic v2 lazy-validator fields (notably `tool_calls: Iterable[...]`
+    -- chat_utils.py:293). The Qwen jinja template (and all downstream
+    classifier helpers) only need dict-shaped messages; we deliberately
+    avoid `copy.deepcopy(msg)` because pydantic v2 validates `Iterable[...]`
+    lazily into a `pydantic_core._pydantic_core.ValidatorIterator` which is
+    NOT picklable (rust-backed) -- deepcopy walks fields via __reduce_ex__ /
+    pickle and raises
+    `TypeError: cannot pickle 'pydantic_core...ValidatorIterator'`.
+
+    Caveat: a ValidatorIterator can only be consumed ONCE. If the caller
+    held a reference to msg["tool_calls"] before materialization and tries
+    to iterate it later, they'll get an exhausted iterator. The
+    serving.py hook site MUST therefore materialize once and pass the
+    materialized list to ALL downstream consumers (compute_message_token_ranges
+    AND SessionTrackerRegistry.observe_request) -- not pass request.messages
+    directly anywhere after this call.
+
+    Strategy:
+      1. If msg has .model_dump(), use it -- pydantic materializes ALL
+         lazy iterators in the process.
+      2. Otherwise (plain dict / TypedDict from tests), copy keys manually
+         and force-list any iterable tool_calls field.
+    """
+    # Pydantic v2 model_dump materializes lazy validators. Use default mode
+    # ('python') so nested pydantic objects also become plain dicts.
+    if hasattr(msg, "model_dump") and callable(msg.model_dump):
+        try:
+            return msg.model_dump()
+        except Exception:
+            pass  # fall through to dict path
+
+    if not isinstance(msg, dict):
+        # Custom TypedDict-like object; coerce to dict.
+        try:
+            return dict(msg)
+        except Exception:
+            return {}
+
+    out: dict = {}
+    for k, v in msg.items():
+        if k == "tool_calls" and v is not None:
+            # Materialize lazy iterator into a list of plain dicts.
+            materialized: list = []
+            for tc in v:
+                if hasattr(tc, "model_dump") and callable(tc.model_dump):
+                    materialized.append(tc.model_dump())
+                elif isinstance(tc, dict):
+                    materialized.append(dict(tc))
+                else:
+                    try:
+                        materialized.append(dict(tc))
+                    except Exception:
+                        materialized.append(tc)
+            out[k] = materialized
+        else:
+            out[k] = v
+    return out
+
+
+def materialize_messages(messages: list) -> list[dict]:
+    """Public helper: return a list of plain-dict copies of `messages`,
+    eagerly materializing all pydantic v2 lazy iterators. Call once at the
+    hook site and pass the result to ALL downstream tracker functions to
+    avoid double-consumption of `tool_calls` ValidatorIterators (debug
+    session agent-tracker-observe-no-user-query, Issue 2).
+    """
+    return [_materialize_message(m) for m in messages]
+
+
+def _coerce_tool_call_arguments(messages: list) -> list[dict]:
+    """Return a list of plain-dict copies of `messages` with every
+    tool_call's `arguments` field coerced from JSON-encoded string to dict
+    (mirrors offline helper section 1). Non-mapping JSON values are wrapped
+    under a single-key dict so the template's `.items()` call still
+    succeeds. Unparseable strings are left as-is so genuinely broken
+    payloads still surface as exceptions.
+
+    Pickling-safe: uses _materialize_message to eagerly materialize any
+    pydantic v2 lazy `Iterable[...]` validators (debug session
+    agent-tracker-observe-no-user-query, Issue 2). Idempotent if called on
+    an already-materialized list.
+    """
+    import json as _json
+
+    out: list[dict] = [_materialize_message(m) for m in messages]
+    for msg in out:
+        if not isinstance(msg, dict):
+            continue
+        tool_calls = msg.get("tool_calls")
+        if not tool_calls or not isinstance(tool_calls, list):
+            continue
+        for tc in tool_calls:
+            if not isinstance(tc, dict):
+                continue
+            target = (
+                tc.get("function")
+                if isinstance(tc.get("function"), dict)
+                else tc
+            )
+            args = target.get("arguments")
+            if isinstance(args, str):
+                try:
+                    parsed = _json.loads(args)
+                    if isinstance(parsed, dict):
+                        target["arguments"] = parsed
+                    else:
+                        target["arguments"] = {"_raw": parsed}
+                except (_json.JSONDecodeError, TypeError):
+                    pass
+    return out
+
+
+def _prefix_has_user(prefix: list[dict]) -> bool:
+    """True if the prefix contains at least one role=user message whose content
+    is not a <tool_response>...</tool_response> wrapper. Mirrors the Qwen jinja
+    template's `last_query_index` reverse-walk (chat_template.jinja:67-80)."""
+    for m in prefix:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            stripped = content.strip()
+            if stripped.startswith("<tool_response>") and stripped.endswith(
+                "</tool_response>"
+            ):
+                continue
+        return True
+    return False
+
+
+def _inject_placeholder_after_leading_system(prefix: list[dict]) -> list[dict]:
+    """Return a copy of `prefix` with a placeholder user message inserted just
+    after any leading role=system messages. Idempotent: if the prefix already
+    contains a user message, returns it unchanged.
+
+    Mirrors scripts/analyze_tokens.py:_normalize_messages_for_chat_template
+    section (2). The placeholder satisfies the chat template's user-query check
+    without disturbing the relative order of any real content.
+    """
+    if _prefix_has_user(prefix):
+        return list(prefix)
+    insert_at = 0
+    for i, m in enumerate(prefix):
+        if isinstance(m, dict) and m.get("role") == "system":
+            insert_at = i + 1
+        else:
+            break
+    out = list(prefix)
+    out.insert(insert_at, dict(_PLACEHOLDER_USER_MSG))
+    return out
+
 
 def compute_message_token_ranges(
-    messages: list[dict],
+    messages: list,
     tokenizer,
     request,
     chat_template: str | None,
     chat_template_content_format: str,
     default_chat_template_kwargs: dict,
+    tools: list[dict] | None = None,
 ) -> list[tuple[int, int]]:
     """Per-message token ranges via incremental re-tokenization (RESEARCH Finding 7).
 
@@ -78,22 +251,105 @@ def compute_message_token_ranges(
     and gracefully degrade (logger.warning + skip the tracker for that request)
     when they disagree. This function is the helper; the assertion lives at the
     callsite where prompt_token_ids is known.
+
+    NORMALIZATION (debug session: agent-tracker-observe-no-user-query):
+    Two Qwen jinja chat-template quirks force pre-processing here.
+
+    (a) tool_call.arguments arrives as a JSON-encoded string from litellm,
+        which trips `TypeError: Can only get item pairs from a mapping.`
+        inside the template. We coerce them to dict ONCE on the full message
+        list before iterating prefixes; the coerced list is what we slice in
+        the loop. The coercion is purely structural (string -> dict) and does
+        not change the rendered token count -- tojson on a dict produces the
+        same JSON string as the original.
+
+    (b) When a prefix has no non-tool-response user message, the template
+        raises 'No user query found in messages.' at the `last_query_index`
+        check (chat_template.jinja:67-80). The very first iteration (i=1,
+        messages[:1] = [system]) always trips this for mini-swe-agent. We
+        inject a placeholder user message after any leading system block when
+        a prefix lacks a user, render the augmented prefix, and subtract a
+        precomputed placeholder overhead so the running length matches what
+        the prefix WOULD render to without the placeholder. The final
+        iteration (full messages list) has a real user, is rendered natively,
+        and therefore satisfies the engine-side assertion
+        `ranges[-1][1] == len(prompt_token_ids)` exactly.
+
+    TOOLS (debug session Issue 1, 2026-04-28): the engine renders
+    prompt_token_ids via safe_apply_chat_template(tools=tool_dicts, ...) where
+    tool_dicts = [t.model_dump() for t in request.tools]. The Qwen jinja
+    template's tools-preamble contributes a fixed per-render overhead inside
+    the system block when tools is not None. This helper therefore MUST
+    receive the same `tools` list and pass it on every apply_chat_template
+    call -- including the placeholder-overhead probe (the probe is a
+    standalone render, but the tools preamble is emitted unconditionally
+    when tools is not none, so the probe length already includes the
+    tools-preamble overhead and naturally cancels out via subtraction).
     """
+    # NORMALIZATION (a): coerce tool_call.arguments once on the full list.
+    # Also materializes pydantic v2 lazy iterators so subsequent iteration
+    # is pickling-safe (Issue 2).
+    norm_messages = _coerce_tool_call_arguments(messages)
+
     ranges: list[tuple[int, int]] = []
     prev_len = 0
     kwargs = {
         **default_chat_template_kwargs,
         **(getattr(request, "chat_template_kwargs", None) or {}),
     }
-    for i in range(1, len(messages) + 1):
-        rendered = tokenizer.apply_chat_template(
-            messages[:i],
-            chat_template=getattr(request, "chat_template", None) or chat_template,
-            tokenize=True,
-            add_generation_prompt=False,  # we want the raw boundary
-            **kwargs,
-        )
-        cur_len = len(rendered)
+    effective_chat_template = (
+        getattr(request, "chat_template", None) or chat_template
+    )
+
+    # Compute placeholder overhead once. The placeholder user message is
+    # rendered by the Qwen template body loop unconditionally as
+    # `<|im_start|>user\n{content}<|im_end|>\n` (chat_template.jinja:87-88).
+    # Its contribution is INDEPENDENT of `tools` -- the tools-preamble is
+    # emitted as a SEPARATE block before the body loop. So we probe with
+    # tools=None to isolate just the user-message overhead. When the probe
+    # is subtracted from a tools-aware injected-prefix render, the
+    # tools-preamble cancels naturally:
+    #     render([system, placeholder_user], tools=T)  =  T_with_sys + P
+    #     - probe (tools=None)                         =          - P
+    #     = T_with_sys                                 =  natural render([system], tools=T)
+    # Computed lazily (only once we see a prefix that needs it) to avoid
+    # paying the probe cost for sessions that always have a user in messages[0].
+    placeholder_overhead: int | None = None
+
+    for i in range(1, len(norm_messages) + 1):
+        prefix = norm_messages[:i]
+        if _prefix_has_user(prefix):
+            rendered = tokenizer.apply_chat_template(
+                prefix,
+                chat_template=effective_chat_template,
+                tools=tools,
+                tokenize=True,
+                add_generation_prompt=False,
+                **kwargs,
+            )
+            cur_len = len(rendered)
+        else:
+            if placeholder_overhead is None:
+                # Probe with tools=None -- isolates the placeholder user
+                # message's contribution (independent of tools-preamble).
+                placeholder_overhead = len(tokenizer.apply_chat_template(
+                    [dict(_PLACEHOLDER_USER_MSG)],
+                    chat_template=effective_chat_template,
+                    tools=None,
+                    tokenize=True,
+                    add_generation_prompt=False,
+                    **kwargs,
+                ))
+            normalized = _inject_placeholder_after_leading_system(prefix)
+            rendered = tokenizer.apply_chat_template(
+                normalized,
+                chat_template=effective_chat_template,
+                tools=tools,
+                tokenize=True,
+                add_generation_prompt=False,
+                **kwargs,
+            )
+            cur_len = max(0, len(rendered) - placeholder_overhead)
         ranges.append((prev_len, cur_len))
         prev_len = cur_len
     return ranges

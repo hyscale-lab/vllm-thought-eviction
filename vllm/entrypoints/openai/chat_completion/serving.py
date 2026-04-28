@@ -82,6 +82,7 @@ from vllm.thought_eviction.orchestrator import EvictionOrchestrator
 from vllm.agent_tracker.tracker import (
     compute_message_token_ranges,
     get_session_tracker_registry,
+    materialize_messages,
 )
 
 if TYPE_CHECKING:
@@ -246,13 +247,35 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_token_ids = self._extract_prompt_components(
                     engine_inputs[0]
                 ).token_ids
+                # Materialize messages ONCE here. pydantic v2 lazily validates
+                # tool_calls into a ValidatorIterator (rust-backed, not
+                # picklable, single-consumption). Pass the materialized list
+                # to BOTH compute_message_token_ranges AND
+                # SessionTrackerRegistry.observe_request -- never pass
+                # request.messages directly to either, otherwise downstream
+                # iteration will trip a `cannot pickle ValidatorIterator`
+                # error or get an exhausted iterator. (Debug session
+                # agent-tracker-observe-no-user-query, Issue 2.)
+                materialized_messages = materialize_messages(request.messages)
+                # Mirror the engine's preprocess_chat: tool_dicts is
+                # `[t.model_dump() for t in request.tools]` or None. The Qwen
+                # jinja template's tools-preamble contributes ~tens-to-hundreds
+                # of tokens; without threading this through, the tracker's
+                # rendered length undercounts and the engine-side assertion
+                # `ranges[-1][1] == len(prompt_token_ids)` fires. (Debug
+                # session agent-tracker-observe-no-user-query, Issue 1.)
+                if request.tools is None:
+                    tool_dicts: list[dict] | None = None
+                else:
+                    tool_dicts = [t.model_dump() for t in request.tools]
                 msg_token_ranges = compute_message_token_ranges(
-                    messages=request.messages,
+                    messages=materialized_messages,
                     tokenizer=tokenizer,
                     request=request,
                     chat_template=self.chat_template,
                     chat_template_content_format=self.chat_template_content_format,
                     default_chat_template_kwargs=self.default_chat_template_kwargs,
+                    tools=tool_dicts,
                 )
                 registry = (
                     getattr(raw_request.app.state, "session_tracker_registry", None)
@@ -262,7 +285,7 @@ class OpenAIServingChat(OpenAIServing):
                     registry = get_session_tracker_registry()
                 registry.observe_request(
                     session_id=request.agent_tracker.session_id,
-                    structured_messages=request.messages,
+                    structured_messages=materialized_messages,
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,
                 )
