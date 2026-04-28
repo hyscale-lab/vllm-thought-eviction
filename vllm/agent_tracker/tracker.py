@@ -584,7 +584,14 @@ class SessionTracker:
                 prev_ts = self.evictable_map[-1]
                 natural_end = message_token_ranges[self.prev_msg_count - 1][1]
                 old_start, old_end = prev_ts.token_range
-                if natural_end < old_end:
+                # Guard: only fire the +5-style trim when it preserves
+                # monotonicity. A LARGE backward jump (natural_end < old_start)
+                # indicates a chat-template `last_query_index` flip rebased the
+                # frame -- not a scaffolding adjustment -- and applying the
+                # trim would corrupt the prior turn's range. Leave the prior
+                # turn alone in that case; its absolute frame is stale but at
+                # least internally monotonic.
+                if natural_end < old_end and natural_end >= old_start:
                     delta = old_end - natural_end
                     prev_ts.token_range = (old_start, natural_end)
                     prev_ts.token_count = max(0, prev_ts.token_count - delta)
@@ -604,6 +611,36 @@ class SessionTracker:
                 message_token_ranges[cumulative_msg_idx][0],
                 message_token_ranges[group_end - 1][1],
             )
+
+            # Option B: skip non-monotonic turn. Qwen3.6's chat template strips
+            # `<think>` blocks from prior assistants when a new non-tool-response
+            # user msg becomes `last_query_index`, which can make
+            # cum_len(prefix[:n+1]) < cum_len(prefix[:n]) and yield
+            # token_range[1] < token_range[0]. Append-skip + advance prev_msg_count
+            # so subsequent turns chain forward in the new (post-flip) frame.
+            if token_range[1] < token_range[0]:
+                logger.warning(
+                    "agent_tracker: skipping non-monotonic turn for sid=%s "
+                    "turn_idx=%d msg_range=%s token_range=(%d,%d) "
+                    "(chat-template last_query_index flip stripped prior <think>)",
+                    self.session_id, len(self.evictable_map), msg_range,
+                    token_range[0], token_range[1],
+                )
+                # Advance prev_msg_count so the next observe sees correct
+                # alignment, but do NOT append to evictable_map / file_timeline
+                # / run reclassification for this turn.
+                self.prev_msg_count = len(structured_messages)
+                self._apply_n_decay()
+                self._enforce_no_evict_zone_floor()
+                payload = self._build_log_payload(
+                    new_msgs_count=new_msgs_count,
+                    new_evictable_tokens=0,
+                    exact_match_hit=False,
+                    latency_ms=(time.monotonic() - t0) * 1000.0,
+                )
+                logger.info("agent_tracker: %s", payload)
+                return payload
+
             turn_idx = len(self.evictable_map)
 
             # Reuse offline _classify_new_messages for category + command.
