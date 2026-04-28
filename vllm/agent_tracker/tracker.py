@@ -718,13 +718,42 @@ class SessionTracker:
         """D-08: when a new turn references files, walk FileTimeline and mutate
         prior TurnStates' evictable/eviction_reason/superseded_by.
 
-        Reuses _files_overlap from the offline classifier."""
+        Reuses _files_overlap from the offline classifier.
+
+        D-19 PARITY (debug round 4, 2026-04-28): two corrections vs the
+        original implementation so that incremental back-walking matches
+        offline `classify_conversation`'s forward-scan semantics
+        (`scripts/trajectory_classifier.py:526-539`):
+
+        (1) FIRST supersedor wins. The offline forward scan from turn i
+            breaks on the first overlap with a target later turn; later
+            supersedors do NOT overwrite the attribution. The live
+            incremental back-walk must NOT overwrite a prior turn's
+            already-set supersession reason. EXCEPTION: provisional
+            `decayed_N_turns` marks (which `_apply_n_decay` may have set
+            speculatively before the real supersedor arrived) MUST be
+            allowed to upgrade to a `superseded_by_*` reason -- offline
+            decides supersession-vs-decay only AFTER seeing the whole
+            conversation, so the live tracker has to upgrade decay-marks
+            when stronger evidence appears later.
+
+        (2) FILE_SEARCH is a supersedor too. The offline classifier
+            treats FILE_READ + FILE_SEARCH symmetrically as
+            `superseded_by_later_read` (line 535). The original live
+            implementation silently dropped SEARCH, leaving many turns
+            falling through to `decayed_N_turns` instead of
+            `superseded_by_later_read=<search_idx>`.
+        """
         new_ts = self.evictable_map[new_turn_idx]
         if not new_ts.files_referenced:
             return
         for prior_idx in range(new_turn_idx):
             prior = self.evictable_map[prior_idx]
             if not prior.files_referenced:
+                continue
+            # Correction (1): preserve the FIRST (earliest) supersedor.
+            # Provisional decay marks may still be upgraded.
+            if prior.evictable and prior.eviction_reason != "decayed_N_turns":
                 continue
             if _files_overlap(
                 prior.files_referenced, new_ts.files_referenced,
@@ -734,30 +763,77 @@ class SessionTracker:
                     prior.evictable = True
                     prior.eviction_reason = "superseded_by_edit"
                     prior.superseded_by = new_turn_idx
-                elif new_ts.category == MSA_TOOL_FILE_READ:
+                elif new_ts.category in (
+                    MSA_TOOL_FILE_READ, MSA_TOOL_FILE_SEARCH,
+                ):
+                    # Correction (2): SEARCH is symmetric with READ for
+                    # supersession (mirror offline line 535).
                     prior.evictable = True
                     prior.eviction_reason = "superseded_by_later_read"
                     prior.superseded_by = new_turn_idx
 
     def _apply_n_decay(self) -> None:
-        """D-09: turns older than (n_turns - n_decay - 1) and not already
-        evictable are marked decayed_N_turns. AGENT_TOOL_CALL turns are
-        preserved as anchors per Phase 01.3 finding (`STATE.md`:
-        'Do NOT evict Agent tool call records (28.2% budget) -- they are
-        segment anchors')."""
+        """D-09 N-decay heuristic. AGENT_TOOL_CALL turns are preserved as
+        anchors per Phase 01.3 finding (`STATE.md`: 'Do NOT evict Agent tool
+        call records (28.2% budget) -- they are segment anchors').
+
+        D-19 PARITY (debug round 4, 2026-04-28): mirror the offline
+        decay logic in `scripts/trajectory_classifier.py:544-585`. The
+        original live implementation skipped the file-overlap-in-window
+        check, causing OVER-DECAY of turns whose files are still being
+        actively referenced in the next n_decay turns.
+
+        For each turn that survived supersession (not already evictable):
+          - Tail guard: spare turns whose `i + n_decay >= n` (these are
+            the most recent few; offline uses `(i + n_decay) < len(states)`).
+          - Category gate: only OBSERVATION + AGENT_REASONING decay
+            (matches offline -- SYSTEM/USER/AGENT_TOOL_CALL never decay,
+            tool-call records are anchors).
+          - File-window check: if the turn references files AND any of
+            those files appears in `[i+1, i+n_decay]`, do NOT decay
+            (the file is still relevant to the active investigation).
+          - No-files turns (e.g. test runs, build outputs with no
+            specific path) decay purely by turn count.
+        """
         n = len(self.evictable_map)
-        cutoff = n - self.n_decay - 1
-        for ts in self.evictable_map:
-            if ts.turn_idx > cutoff:
-                continue
+        states = self.evictable_map.all_turns()
+        n_decay = self.n_decay
+        for i, ts in enumerate(states):
             if ts.evictable:
                 continue
             if ts.category == MSA_AGENT_TOOL_CALL:
                 continue
-            if ts.category == MSA_SYSTEM_PROMPT or ts.category == MSA_USER_TASK:
+            if ts.category in (MSA_SYSTEM_PROMPT, MSA_USER_TASK):
                 continue
-            ts.evictable = True
-            ts.eviction_reason = "decayed_N_turns"
+            # Tail guard (mirror offline `(i + n_decay) < len(states)`).
+            if (i + n_decay) >= n:
+                continue
+            # Only observation + reasoning categories decay (mirror offline
+            # branch structure at lines 523, 568).
+            if (
+                ts.category not in _OBSERVATION_CATEGORIES
+                and ts.category != MSA_AGENT_REASONING
+            ):
+                continue
+            if ts.files_referenced:
+                referenced_in_window = False
+                for j in range(i + 1, min(i + n_decay + 1, n)):
+                    later = states[j]
+                    if _files_overlap(
+                        ts.files_referenced, later.files_referenced,
+                        ts.files_referenced_full,
+                        later.files_referenced_full,
+                    ):
+                        referenced_in_window = True
+                        break
+                if not referenced_in_window:
+                    ts.evictable = True
+                    ts.eviction_reason = "decayed_N_turns"
+            else:
+                # No files referenced -- pure turn-decay
+                # (e.g. test runs, build outputs).
+                ts.evictable = True
+                ts.eviction_reason = "decayed_N_turns"
 
     def _enforce_no_evict_zone_floor(self) -> None:
         """D-10: any TurnState whose token_range starts below the per-session
