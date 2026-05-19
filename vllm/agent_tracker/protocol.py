@@ -19,6 +19,13 @@ class AgentTrackerParams(OpenAIBaseModel):
     """
     session_id: str
     enabled: bool = True
+    server_side_prompt_eviction: bool = Field(
+        default=False,
+        description=(
+            "If true, the server actively drops evictable turns from the "
+            "engine's prompt_token_ids before generation."
+        ),
+    )
     # D-09: reserved for future configurability; not exposed in v1.
     # n_decay: int | None = Field(default=None, ge=1, le=20)
 
@@ -31,6 +38,7 @@ class TurnOpportunity(OpenAIBaseModel):
     reason: str  # essential | superseded_by_edit | superseded_by_later_read | decayed_N_turns
     msg_range: tuple[int, int]
     token_range: tuple[int, int]
+    obs_token_range: tuple[int, int] | None = None
     superseded_by: int | None = None
 
 

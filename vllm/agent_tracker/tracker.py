@@ -670,10 +670,12 @@ class SessionTracker:
             # Observation-message hash (D-11): hash the OBSERVATION message's
             # tokens. For tool/function role messages only.
             obs_hash: bytes | None = None
+            obs_token_range: tuple[int, int] | None = None
             for j in range(cumulative_msg_idx, group_end):
                 role = self._all_messages[j].get("role")
                 if role in ("tool", "function"):
                     seg_start, seg_end = message_token_ranges[j]
+                    obs_token_range = (seg_start, seg_end)
                     obs_hash = hash_token_sequence(
                         prompt_token_ids[seg_start:seg_end]
                     )
@@ -700,6 +702,7 @@ class SessionTracker:
                 superseded_by=None,
                 msg_range=msg_range,
                 token_range=token_range,
+                obs_token_range=obs_token_range,
                 obs_token_hash=obs_hash,
             )
             self.evictable_map.append(ts)
@@ -956,6 +959,9 @@ class SessionTracker:
                     "reason": ts.eviction_reason,
                     "msg_range": list(ts.msg_range),
                     "token_range": list(ts.token_range),
+                    "obs_token_range": (
+                        list(ts.obs_token_range) if ts.obs_token_range else None
+                    ),
                     "superseded_by": ts.superseded_by,
                 }
                 for ts in self.evictable_map

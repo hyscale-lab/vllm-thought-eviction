@@ -313,9 +313,40 @@ class OpenAIServingChat(OpenAIServing):
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,
                 )
+
+                if getattr(request.agent_tracker, "server_side_prompt_eviction", False):
+                    opp = registry.get_opportunity(request.agent_tracker.session_id)
+                    if opp and opp.get("turns"):
+                        drop_indices = set()
+                        for turn in opp["turns"]:
+                            if turn.get("evictable") and turn.get("reason", "") == "superseded_by_later_read":
+                                # The tracker groups assistant (reasoning + tool call) and tool (output) 
+                                # messages into a single turn. To preserve the agent's trajectory, 
+                                # we ONLY drop the tool output tokens (obs_token_range), leaving the 
+                                # assistant's reasoning and tool call intact.
+                                obs_range = turn.get("obs_token_range")
+                                if obs_range:
+                                    start_tok, end_tok = obs_range
+                                    drop_indices.update(range(start_tok, end_tok))
+                        if drop_indices:
+                            # Use prompt_token_ids which is guaranteed to be extracted correctly
+                            old_tokens = prompt_token_ids
+                            new_tokens = [
+                                tok for idx, tok in enumerate(old_tokens)
+                                if idx not in drop_indices
+                            ]
+                            engine_inputs[0]["prompt_token_ids"] = new_tokens
+                            # Remove the raw text prompt so the engine is forced to use the 
+                            # truncated token sequence, avoiding mismatch.
+                            engine_inputs[0].pop("prompt", None)
+                            logger.info(
+                                "agent_tracker: server-side prompt eviction removed %d tokens "
+                                "(original: %d, new: %d)",
+                                len(drop_indices), len(old_tokens), len(new_tokens)
+                            )
             except Exception as exc:
                 logger.warning(
-                    "agent_tracker observe failed for session %s: %s",
+                    "agent_tracker hook failed for session %s: %s",
                     request.agent_tracker.session_id, exc,
                 )
 
