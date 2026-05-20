@@ -286,10 +286,18 @@ class OpenAIServingChat(OpenAIServing):
                     tool_dicts: list[dict] | None = None
                 else:
                     tool_dicts = [t.model_dump() for t in request.tools]
-                # Round 3 Bug A2: thread add_generation_prompt /
-                # continue_final_message through so the FINAL prefix
-                # iteration absorbs the gen_prompt overhead and matches
-                # len(prompt_token_ids) exactly.
+                # Resolve registry BEFORE compute_message_token_ranges so we
+                # can query prev_msg_count and skip redundant prefix
+                # tokenization (O(N) -> O(new_msgs) per request).
+                registry = (
+                    getattr(raw_request.app.state, "session_tracker_registry", None)
+                    if raw_request is not None else None
+                )
+                if registry is None:
+                    registry = get_session_tracker_registry()
+                sid = request.agent_tracker.session_id
+                prev_msg_count = registry.get_prev_msg_count(sid)
+                start_from = max(0, prev_msg_count - 1)
                 msg_token_ranges = compute_message_token_ranges(
                     messages=materialized_messages,
                     tokenizer=tokenizer,
@@ -300,18 +308,14 @@ class OpenAIServingChat(OpenAIServing):
                     tools=tool_dicts,
                     add_generation_prompt=request.add_generation_prompt,
                     continue_final_message=request.continue_final_message,
+                    start_from=start_from,
                 )
-                registry = (
-                    getattr(raw_request.app.state, "session_tracker_registry", None)
-                    if raw_request is not None else None
-                )
-                if registry is None:
-                    registry = get_session_tracker_registry()
                 registry.observe_request(
-                    session_id=request.agent_tracker.session_id,
+                    session_id=sid,
                     structured_messages=materialized_messages,
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,
+                    partial_ranges=(start_from > 0),
                 )
 
                 if getattr(request.agent_tracker, "server_side_prompt_eviction", False):

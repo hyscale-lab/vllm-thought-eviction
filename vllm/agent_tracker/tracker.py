@@ -236,18 +236,18 @@ def compute_message_token_ranges(
     tools: list[dict] | None = None,
     add_generation_prompt: bool = True,
     continue_final_message: bool = False,
+    start_from: int = 0,
 ) -> list[tuple[int, int]]:
     """Per-message token ranges via incremental re-tokenization (RESEARCH Finding 7).
 
-    HIGHEST-RISK helper of Phase 01.4: apply_chat_template does NOT support
-    return_offsets_mapping (only the raw `encode` path on fast tokenizers does).
-    The cheapest reliable approach is to re-run the chat template on growing
-    prefixes and record the running length. Each prefix tokenization includes
-    the role-marker / separator tokens at message boundaries, so the resulting
-    ranges sum exactly to the renderer's flat prompt length.
+    When ``start_from > 0``, skips the first ``start_from`` prefixes and fills
+    those positions with ``(0, 0)`` sentinels.  A single boundary
+    ``apply_chat_template(messages[:start_from])`` call seeds ``prev_len``,
+    then only the remaining ``N - start_from`` prefixes are tokenized.  This
+    reduces per-request cost from O(N) tokenizer calls to O(new_msgs) --
+    typically 3-4 calls instead of 100+ for long conversations.
 
-    Cost: ~50-100ms for 300-turn sessions. Acceptable for v1 (CONTEXT D-03 says
-    smoke test must report tracker latency; revisit only if >50ms regression).
+    Callers MUST treat ``ranges[j]`` for ``j < start_from`` as invalid.
 
     The hook (Plan 04) MUST assert ``ranges[-1][1] == len(prompt_token_ids)``
     and gracefully degrade (logger.warning + skip the tracker for that request)
@@ -304,8 +304,6 @@ def compute_message_token_ranges(
     # is pickling-safe (Issue 2).
     norm_messages = _coerce_tool_call_arguments(messages)
 
-    ranges: list[tuple[int, int]] = []
-    prev_len = 0
     kwargs = {
         **default_chat_template_kwargs,
         **(getattr(request, "chat_template_kwargs", None) or {}),
@@ -319,6 +317,7 @@ def compute_message_token_ranges(
     )
 
     n = len(norm_messages)
+    start_from = max(0, min(start_from, n))
 
     # Compute placeholder overhead once. The placeholder user message is
     # rendered by the Qwen template body loop unconditionally as
@@ -338,52 +337,54 @@ def compute_message_token_ranges(
     # paying the probe cost for sessions that always have a user in messages[0].
     placeholder_overhead: int | None = None
 
-    for i in range(1, n + 1):
-        is_final = (i == n)
-        # Engine uses request.add_generation_prompt (default True) on the
-        # full conversation -- mirror that ONLY on the final iteration so
-        # the gen_prompt overhead lands in the last range (preserves
-        # cumulative-sum invariant).
-        iter_add_gen = add_generation_prompt if is_final else False
-        iter_continue_final = continue_final_message if is_final else False
-        prefix = norm_messages[:i]
+    def _render_prefix(prefix, *, is_final):
+        nonlocal placeholder_overhead
+        agp = add_generation_prompt if is_final else False
+        cfm = continue_final_message if is_final else False
         if _prefix_has_user(prefix):
             rendered = tokenizer.apply_chat_template(
                 prefix,
                 chat_template=effective_chat_template,
                 tools=tools,
                 tokenize=True,
-                add_generation_prompt=iter_add_gen,
-                continue_final_message=iter_continue_final,
+                add_generation_prompt=agp,
+                continue_final_message=cfm,
                 **kwargs,
             )
-            cur_len = len(rendered)
-        else:
-            if placeholder_overhead is None:
-                # Probe with tools=None -- isolates the placeholder user
-                # message's contribution (independent of tools-preamble).
-                # Always add_generation_prompt=False -- placeholder branch
-                # only fires for non-final prefixes (final always has a real
-                # user message in mini-swe-agent flow).
-                placeholder_overhead = len(tokenizer.apply_chat_template(
-                    [dict(_PLACEHOLDER_USER_MSG)],
-                    chat_template=effective_chat_template,
-                    tools=None,
-                    tokenize=True,
-                    add_generation_prompt=False,
-                    **kwargs,
-                ))
-            normalized = _inject_placeholder_after_leading_system(prefix)
-            rendered = tokenizer.apply_chat_template(
-                normalized,
+            return len(rendered)
+        if placeholder_overhead is None:
+            placeholder_overhead = len(tokenizer.apply_chat_template(
+                [dict(_PLACEHOLDER_USER_MSG)],
                 chat_template=effective_chat_template,
-                tools=tools,
+                tools=None,
                 tokenize=True,
-                add_generation_prompt=iter_add_gen,
-                continue_final_message=iter_continue_final,
+                add_generation_prompt=False,
                 **kwargs,
-            )
-            cur_len = max(0, len(rendered) - placeholder_overhead)
+            ))
+        normalized = _inject_placeholder_after_leading_system(prefix)
+        rendered = tokenizer.apply_chat_template(
+            normalized,
+            chat_template=effective_chat_template,
+            tools=tools,
+            tokenize=True,
+            add_generation_prompt=agp,
+            continue_final_message=cfm,
+            **kwargs,
+        )
+        return max(0, len(rendered) - placeholder_overhead)
+
+    # -- Fast path: skip prefixes [1..start_from] via a single boundary call --
+    if start_from > 0:
+        ranges: list[tuple[int, int]] = [(0, 0)] * start_from
+        prev_len = _render_prefix(norm_messages[:start_from], is_final=False)
+        loop_start = start_from + 1
+    else:
+        ranges = []
+        prev_len = 0
+        loop_start = 1
+
+    for i in range(loop_start, n + 1):
+        cur_len = _render_prefix(norm_messages[:i], is_final=(i == n))
         ranges.append((prev_len, cur_len))
         prev_len = cur_len
     return ranges
@@ -464,6 +465,7 @@ class SessionTracker:
         structured_messages: list[dict],
         prompt_token_ids: list[int],
         message_token_ranges: list[tuple[int, int]],
+        partial_ranges: bool = False,
     ) -> dict[str, Any]:
         """Process a single chat completion. Returns the D-17 log payload.
 
@@ -471,6 +473,12 @@ class SessionTracker:
         zone (D-10) from the leading system + first user messages. On
         subsequent calls, if the leading prefix has mutated the tracker logs
         a warning and keeps the original value.
+
+        When ``partial_ranges`` is True, early entries in
+        ``message_token_ranges`` are ``(0, 0)`` sentinels (see
+        ``compute_message_token_ranges(start_from=...)``).  The no-evict
+        zone drift check is skipped because the sentinel ranges would
+        produce a spurious mismatch.
 
         Mutates self.* in place. Idempotent over identical inputs (the
         message-count delta is the only state advancement signal -- if
@@ -503,7 +511,7 @@ class SessionTracker:
                 "agent_tracker: session %s no_evict_zone_tokens=%d (dynamic, locked)",
                 self.session_id, self.no_evict_zone_tokens,
             )
-        else:
+        elif not partial_ranges:
             # If the leading prefix mutated, warn and keep the original.
             # Tolerance: the FIRST request's no_evict_zone may include the
             # add_generation_prompt scaffolding (~5 tokens for Qwen3.6) when
@@ -1001,6 +1009,11 @@ class SessionTrackerRegistry:
         self._sessions: OrderedDict[str, SessionTracker] = OrderedDict()
         self.idle_timeout = idle_timeout_seconds
         self.max_sessions = max_sessions
+
+    def get_prev_msg_count(self, session_id: str) -> int:
+        """Return the session's prev_msg_count (0 if session doesn't exist yet)."""
+        s = self._sessions.get(session_id)
+        return s.prev_msg_count if s is not None else 0
 
     def observe_request(self, *, session_id: str, **kwargs) -> dict:
         self._gc()
