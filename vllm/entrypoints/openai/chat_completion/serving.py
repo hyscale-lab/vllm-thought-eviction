@@ -79,6 +79,7 @@ from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from vllm.thought_eviction.orchestrator import EvictionOrchestrator
+from vllm.agent_tracker.metrics import record_filter as _record_eviction_filter
 from vllm.agent_tracker.tracker import (
     compute_message_token_ranges,
     get_session_tracker_registry,
@@ -319,14 +320,16 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
                 if getattr(request.agent_tracker, "server_side_prompt_eviction", False):
+                    raw_token_count = len(prompt_token_ids) if prompt_token_ids else 0
+                    filtered_count = 0
                     opp = registry.get_opportunity(request.agent_tracker.session_id)
                     if opp and opp.get("turns"):
                         drop_indices = set()
                         for turn in opp["turns"]:
                             if turn.get("evictable") and turn.get("reason", "") == "superseded_by_later_read":
-                                # The tracker groups assistant (reasoning + tool call) and tool (output) 
-                                # messages into a single turn. To preserve the agent's trajectory, 
-                                # we ONLY drop the tool output tokens (obs_token_range), leaving the 
+                                # The tracker groups assistant (reasoning + tool call) and tool (output)
+                                # messages into a single turn. To preserve the agent's trajectory,
+                                # we ONLY drop the tool output tokens (obs_token_range), leaving the
                                 # assistant's reasoning and tool call intact.
                                 obs_range = turn.get("obs_token_range")
                                 if obs_range:
@@ -340,14 +343,16 @@ class OpenAIServingChat(OpenAIServing):
                                 if idx not in drop_indices
                             ]
                             engine_inputs[0]["prompt_token_ids"] = new_tokens
-                            # Remove the raw text prompt so the engine is forced to use the 
+                            # Remove the raw text prompt so the engine is forced to use the
                             # truncated token sequence, avoiding mismatch.
                             engine_inputs[0].pop("prompt", None)
+                            filtered_count = len(drop_indices)
                             logger.info(
                                 "agent_tracker: server-side prompt eviction removed %d tokens "
                                 "(original: %d, new: %d)",
-                                len(drop_indices), len(old_tokens), len(new_tokens)
+                                filtered_count, len(old_tokens), len(new_tokens)
                             )
+                    _record_eviction_filter(raw_token_count, filtered_count)
             except Exception as exc:
                 logger.warning(
                     "agent_tracker hook failed for session %s: %s",
