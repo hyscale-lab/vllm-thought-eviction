@@ -249,6 +249,58 @@ def build_tool_call_command_map(messages: list) -> dict:
     return mapping
 
 
+def build_tool_call_fn_name_map(messages: list) -> dict:
+    """Map tool_call_id -> tool function name.
+
+    Companion to build_tool_call_command_map for agents (e.g. Hermes) that do
+    file I/O through STRUCTURED tools (`read`/`grep`/`edit` with a `path` arg)
+    rather than bash `cat`/`grep` commands. Used to categorize a tool turn by
+    function name when there is no bash command to parse.
+    """
+    mapping: dict = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in (msg.get("tool_calls") or []):
+            tc_id = tc.get("id") or tc.get("tool_call_id")
+            if not tc_id:
+                continue
+            fn = tc.get("function") or {}
+            mapping[tc_id] = str(fn.get("name") or "").strip().lower()
+    return mapping
+
+
+# Structured-tool function-name -> intent. Checked in EDIT, SEARCH, READ order so
+# e.g. "rewrite"/"str_replace" (contain "write"/"replace") classify as edit, not
+# read, and "file_search" classifies as search. Names vary across agents, so both
+# exact tokens and substrings are matched. Bash/exec tools are intentionally
+# absent: they carry a `command` and go through classify_bash_command_minisweagent.
+_STRUCT_EDIT_KEYS = ("str_replace", "replace", "write", "edit", "patch", "insert",
+                     "create_file", "createfile", "modify", "apply_diff", "apply_patch")
+_STRUCT_SEARCH_KEYS = ("grep", "ripgrep", "glob", "search", "find", "locate",
+                       "list_dir", "list_files", "listdir", "tree")
+_STRUCT_READ_KEYS = ("read", "view", "cat", "open_file", "openfile", "show_file",
+                     "get_file", "getfile", "fileread", "read_file")
+
+
+def classify_structured_tool(fn_name: str) -> str:
+    """Categorize a structured (non-bash) tool call by its function name.
+
+    Returns one of MSA_TOOL_FILE_{EDIT,SEARCH,READ} or "" when the name is not a
+    recognized file tool (caller then falls back to MSA_TOOL_OTHER).
+    """
+    n = (fn_name or "").strip().lower()
+    if not n:
+        return ""
+    if any(k in n for k in _STRUCT_EDIT_KEYS):
+        return MSA_TOOL_FILE_EDIT
+    if any(k in n for k in _STRUCT_SEARCH_KEYS):
+        return MSA_TOOL_FILE_SEARCH
+    if any(k in n for k in _STRUCT_READ_KEYS):
+        return MSA_TOOL_FILE_READ
+    return ""
+
+
 _MSA_FILE_READ_HEADS = {"cat", "head", "tail", "less", "more", "view", "nl", "tac"}
 _MSA_FILE_SEARCH_HEADS = {"find", "grep", "rg", "ag", "ack", "ls", "which",
                           "locate", "whereis", "tree"}
@@ -480,11 +532,19 @@ def _classify_new_messages(new_msgs: list[dict], all_msgs_so_far: list[dict]) ->
                         for item in content
                     )
                 # Find the command for this tool_call_id
-                command = ""
-                cmd_map = build_tool_call_command_map(all_msgs_so_far + new_msgs)
-                command = cmd_map.get(tc_id, "")
-                category = classify_bash_command_minisweagent(command, content)
-                return category, command
+                all_msgs = all_msgs_so_far + new_msgs
+                command = build_tool_call_command_map(all_msgs).get(tc_id, "")
+                if command:
+                    category = classify_bash_command_minisweagent(command, content)
+                    return category, command
+                # Structured tool with no bash command (e.g. Hermes read/grep/edit
+                # carrying a `path` arg): categorize by the tool function name so
+                # file reads are recognized and can be superseded/evicted.
+                struct = classify_structured_tool(
+                    build_tool_call_fn_name_map(all_msgs).get(tc_id, ""))
+                if struct:
+                    return struct, ""
+                return MSA_TOOL_OTHER, ""
         return MSA_TOOL_OTHER, ""
 
     # If assistant message with tool_calls, it's an agent tool call
