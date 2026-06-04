@@ -162,6 +162,20 @@ def _coerce_tool_call_arguments(messages: list) -> list[dict]:
     for msg in out:
         if not isinstance(msg, dict):
             continue
+        # NORMALIZATION (c) -- mirror the engine's reasoning handling.
+        # vLLM drops assistant `reasoning_content` when it parses chat messages
+        # into the prompt (the field is not threaded through parse_chat_messages),
+        # so the Qwen template renders an EMPTY `<think>\n\n</think>` block for
+        # historical assistant turns. apply_chat_template here is fed the raw
+        # request messages, which still carry reasoning_content, so it would
+        # render the full reasoning text -- inflating each assistant turn's range
+        # by its reasoning length and tripping the Finding-7 assertion
+        # (ranges[-1][1] != len(prompt_token_ids)) on ~90% of Hermes turns, which
+        # disables eviction. Blank it so the tracker's render matches the engine's
+        # prompt_token_ids exactly. (Hermes debug 2026-06-04: engine=5119 vs
+        # raw-render=5158 == the turn's 39 reasoning tokens; cumulative per turn.)
+        if msg.get("role") == "assistant" and msg.get("reasoning_content"):
+            msg["reasoning_content"] = ""
         tool_calls = msg.get("tool_calls")
         if not tool_calls or not isinstance(tool_calls, list):
             continue
