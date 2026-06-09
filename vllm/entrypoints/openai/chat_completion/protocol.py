@@ -421,6 +421,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_output_tokens = self.max_tokens
             max_output_tokens_param = "max_tokens"
 
+        # Server-side prompt eviction drops tokens AFTER rendering, so the
+        # render-time length check would reject an oversized prompt before
+        # eviction can trim it. Defer the check here; the eviction hook
+        # re-validates the post-eviction prompt against the same budget.
+        defer_length_check = bool(
+            self.agent_tracker is not None
+            and self.agent_tracker.enabled
+            and self.agent_tracker.server_side_prompt_eviction
+        )
+
         return TokenizeParams(
             max_total_tokens=model_config.max_model_len,
             max_output_tokens=max_output_tokens or 0,
@@ -429,6 +439,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             needs_detokenization=bool(self.echo and not self.return_token_ids),
             max_total_tokens_param="max_model_len",
             max_output_tokens_param=max_output_tokens_param,
+            defer_length_check=defer_length_check,
         )
 
     # Default sampling parameters for chat completion requests

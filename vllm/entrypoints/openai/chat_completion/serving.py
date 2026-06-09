@@ -85,6 +85,7 @@ from vllm.agent_tracker.tracker import (
     get_session_tracker_registry,
     materialize_messages,
 )
+from vllm.exceptions import VLLMValidationError
 
 if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
@@ -297,20 +298,54 @@ class OpenAIServingChat(OpenAIServing):
                 if registry is None:
                     registry = get_session_tracker_registry()
                 sid = request.agent_tracker.session_id
-                prev_msg_count = registry.get_prev_msg_count(sid)
-                start_from = max(0, prev_msg_count - 1)
-                msg_token_ranges = compute_message_token_ranges(
-                    messages=materialized_messages,
-                    tokenizer=tokenizer,
-                    request=request,
-                    chat_template=self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    default_chat_template_kwargs=self.default_chat_template_kwargs,
-                    tools=tool_dicts,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    start_from=start_from,
-                )
+                # Robustness: if the client reused this session_id for a new /
+                # compacted / restarted conversation (e.g. Hermes compacts after
+                # a context-window-overflow 400), the tracker's prev_msg_count is
+                # stale and the incremental fast-path would clamp start_from to
+                # len(messages), yielding all-(0,0) sentinel ranges and tripping
+                # the RESEARCH-Finding-7 assertion on every subsequent turn. Drop
+                # the stale tracker so we rebuild from scratch.
+                if registry.should_reset(sid, materialized_messages):
+                    registry.reset(sid)
+                    prev_msg_count = 0
+                else:
+                    prev_msg_count = registry.get_prev_msg_count(sid)
+                n_msgs = len(materialized_messages)
+                # Clamp so start_from never reaches n_msgs: the final prefix MUST
+                # be rendered for ranges[-1] to be a real (non-sentinel) range.
+                start_from = max(0, min(prev_msg_count - 1, n_msgs - 1))
+
+                def _compute_ranges(sf: int) -> list[tuple[int, int]]:
+                    return compute_message_token_ranges(
+                        messages=materialized_messages,
+                        tokenizer=tokenizer,
+                        request=request,
+                        chat_template=self.chat_template,
+                        chat_template_content_format=self.chat_template_content_format,
+                        default_chat_template_kwargs=self.default_chat_template_kwargs,
+                        tools=tool_dicts,
+                        add_generation_prompt=request.add_generation_prompt,
+                        continue_final_message=request.continue_final_message,
+                        start_from=sf,
+                    )
+
+                msg_token_ranges = _compute_ranges(start_from)
+                # Belt-and-suspenders: if the incremental ranges don't reconcile
+                # with the engine prompt (a divergence the framing check above
+                # didn't catch -- e.g. a mid-conversation truncation), recompute
+                # from scratch so observe_request never sees sentinel ranges.
+                if (
+                    start_from > 0
+                    and prompt_token_ids
+                    and (
+                        not msg_token_ranges
+                        or msg_token_ranges[-1][1] != len(prompt_token_ids)
+                    )
+                ):
+                    registry.reset(sid)
+                    prev_msg_count = 0
+                    start_from = 0
+                    msg_token_ranges = _compute_ranges(0)
                 registry.observe_request(
                     session_id=sid,
                     structured_messages=materialized_messages,
@@ -358,6 +393,35 @@ class OpenAIServingChat(OpenAIServing):
                     "agent_tracker hook failed for session %s: %s",
                     request.agent_tracker.session_id, exc,
                 )
+
+        # Option B: when server-side eviction is active the render-time prompt
+        # length check is deferred (ChatCompletionRequest.build_tok_params ->
+        # TokenizeParams.defer_length_check) so eviction can trim the prompt
+        # first. Enforce the context budget HERE, on the FINAL (post-eviction)
+        # engine prompt. Placed OUTSIDE the hook try/except so an oversized
+        # prompt can never reach the engine even if the tracker hook failed.
+        if (
+            request.agent_tracker is not None
+            and request.agent_tracker.enabled
+            and request.agent_tracker.server_side_prompt_eviction
+        ):
+            tok_params = request.build_tok_params(self.model_config)
+            max_input_tokens = tok_params.max_input_tokens
+            if max_input_tokens is not None:
+                final_len = self._extract_prompt_len(engine_inputs[0])
+                if final_len > max_input_tokens:
+                    raise VLLMValidationError(
+                        f"This model's maximum context length is "
+                        f"{tok_params.max_total_tokens} tokens. However, you "
+                        f"requested {tok_params.max_output_tokens} output tokens "
+                        f"and your prompt contains {final_len} input tokens "
+                        f"after server-side eviction, for a total of "
+                        f"{final_len + tok_params.max_output_tokens} tokens. "
+                        f"Please reduce the length of the input prompt or the "
+                        f"number of requested output tokens.",
+                        parameter="input_tokens",
+                        value=final_len,
+                    )
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"

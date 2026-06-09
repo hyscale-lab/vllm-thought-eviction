@@ -240,6 +240,50 @@ def _inject_placeholder_after_leading_system(prefix: list[dict]) -> list[dict]:
     return out
 
 
+def _message_text(msg: Any) -> str:
+    """Best-effort flatten of a chat message's content to text for cheap
+    equality checks. Handles str content and OpenAI-style list-of-parts
+    content; falls back to str() for anything else."""
+    if not isinstance(msg, dict):
+        return ""
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        out = []
+        for part in content:
+            if isinstance(part, dict):
+                out.append(str(part.get("text", part.get("content", ""))))
+            else:
+                out.append(str(part))
+        return "".join(out)
+    return "" if content is None else str(content)
+
+
+def _framing_signature(messages: list) -> tuple:
+    """Signature of a conversation's IMMUTABLE framing prefix: the leading
+    role=system block plus the FIRST role=user message. Agents (mini-swe-agent /
+    Hermes) hold this constant across a conversation while appending only
+    assistant/tool turns, so the signature is identical on every turn of a given
+    conversation but differs between distinct ones. Used to detect a session_id
+    reused by a genuinely different conversation (see SessionTracker.is_diverged).
+    """
+    parts: list[tuple[str, str]] = []
+    for m in messages:
+        if not isinstance(m, dict):
+            break
+        role = m.get("role")
+        if role == "system":
+            parts.append(("system", _message_text(m)))
+        elif role == "user":
+            parts.append(("user", _message_text(m)))
+            break
+        else:
+            # assistant/tool before any user -> no stable framing to anchor on.
+            break
+    return tuple(parts)
+
+
 def compute_message_token_ranges(
     messages: list,
     tokenizer,
@@ -449,6 +493,39 @@ class SessionTracker:
         self._cumulative_evictable_tokens = 0
         # Accumulated history (for re-classifier helpers that need full context).
         self._all_messages: list[dict] = []
+
+    # ----- Robustness: reused/reset session_id detection ----------------
+    def is_diverged(self, structured_messages: list) -> bool:
+        """True if ``structured_messages`` is NOT an append-extension of what
+        this tracker last observed -- i.e. the client replaced the conversation
+        under the same session_id. The incremental fast-path (start_from =
+        prev_msg_count - 1) and all persisted turn state assume each request
+        only APPENDS messages; when that breaks the tracker must reset (the hook
+        calls registry.should_reset -> registry.reset).
+
+        Two triggers:
+
+        (a) SHRINK -- the request has fewer messages than we've already
+            processed. The dominant cause in practice is a client-side context
+            compaction: the agent's prompt overflows the model context window
+            (vLLM returns 400), and the harness (e.g. Hermes) restarts/compacts
+            the conversation into a much smaller message list under the SAME
+            session_id. Compaction typically preserves the system + first-user
+            framing, so (b) would NOT catch it -- the message-count drop is the
+            reliable signal.
+
+        (b) FRAMING MUTATION -- same-or-greater message count but the immutable
+            leading system + first-user framing changed, meaning a different
+            conversation reused this session_id.
+        """
+        if len(structured_messages) < self.prev_msg_count:
+            return True
+        if self._all_messages and self.prev_msg_count > 0:
+            return (
+                _framing_signature(structured_messages)
+                != _framing_signature(self._all_messages)
+            )
+        return False
 
     # ----- D-10 dynamic no-evict zone helper ----------------------------
     def _compute_initial_no_evict_zone(
@@ -1036,6 +1113,26 @@ class SessionTrackerRegistry:
             logger.info("agent_tracker: new session %s", session_id)
         self._sessions.move_to_end(session_id)
         return self._sessions[session_id].observe_request(**kwargs)
+
+    def should_reset(self, session_id: str, structured_messages: list) -> bool:
+        """True if an existing tracker for ``session_id`` has diverged from
+        ``structured_messages`` (reused/compacted/restarted conversation). The
+        hook consults this BEFORE computing token ranges so it can drop the
+        stale tracker and recompute from scratch (start_from=0) instead of
+        emitting (0,0)-sentinel ranges. Returns False for unknown sessions."""
+        s = self._sessions.get(session_id)
+        return s is not None and s.is_diverged(structured_messages)
+
+    def reset(self, session_id: str) -> None:
+        """Drop any tracker for ``session_id`` so the next observe_request
+        rebuilds it fresh. Used by the hook when a session_id is reused for a
+        new/compacted conversation."""
+        if session_id in self._sessions:
+            del self._sessions[session_id]
+            logger.info(
+                "agent_tracker: reset session %s (conversation replaced/"
+                "compacted -- rebuilding tracker)", session_id,
+            )
 
     def get_opportunity(self, session_id: str) -> dict | None:
         s = self._sessions.get(session_id)

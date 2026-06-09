@@ -184,6 +184,15 @@ class TokenizeParams:
     truncate_prompt_tokens_param: str = "truncate_prompt_tokens"
     """Override this to edit the message for validation errors."""
 
+    defer_length_check: bool = False
+    """If True, skip the render-time prompt-length validation (both the
+    char-based pre-check and the post-tokenization token-length check) AND
+    disable the resource-saving encode-time truncation, so the FULL token
+    sequence is produced. Used by server-side prompt eviction
+    (agent_tracker.server_side_prompt_eviction): eviction drops tokens AFTER
+    rendering, so the budget must be enforced on the post-eviction prompt
+    instead -- the caller is responsible for that re-validation."""
+
     @property
     def max_input_tokens(self) -> int | None:
         """Maximum allowed number of input tokens."""
@@ -283,6 +292,7 @@ class TokenizeParams:
             do_lower_case=do_lower_case,
             add_special_tokens=add_special_tokens,
             needs_detokenization=needs_detokenization,
+            defer_length_check=self.defer_length_check,
         )
 
     def get_encode_kwargs(self) -> dict[str, Any]:
@@ -290,9 +300,15 @@ class TokenizeParams:
         max_length = self.truncate_prompt_tokens
         if max_length is not None and max_length < 0:
             max_length = self.max_input_tokens
-        elif max_length is None and self.max_input_tokens is not None:
+        elif (
+            max_length is None
+            and self.max_input_tokens is not None
+            and not self.defer_length_check
+        ):
             # This prevents tokenization from taking up more resources than necessary
-            # while still failing `self._token_len_check` as expected by users
+            # while still failing `self._token_len_check` as expected by users.
+            # Skipped when defer_length_check is set: server-side eviction needs
+            # the FULL (untruncated) token sequence to evict from.
             max_length = self.max_input_tokens + 1
 
         # Left-side truncation requires the full token sequence so we can
@@ -314,7 +330,7 @@ class TokenizeParams:
     def _text_len_check(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply length checks to prompt text if necessary."""
         max_input_tokens = self.max_input_tokens
-        if max_input_tokens is None:
+        if max_input_tokens is None or self.defer_length_check:
             return text
 
         if self.truncate_prompt_tokens is None and tokenizer is not None:
@@ -405,7 +421,7 @@ class TokenizeParams:
     def _token_len_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply length checks to prompt tokens if necessary."""
         max_input_tokens = self.max_input_tokens
-        if max_input_tokens is None:
+        if max_input_tokens is None or self.defer_length_check:
             return tokens
 
         if len(tokens) > max_input_tokens:
