@@ -50,7 +50,7 @@ logger = init_logger(__name__)
 
 
 # =============================================================================
-# SECTION B -- compute_message_token_ranges helper (RESEARCH Finding 7)
+# SECTION B -- compute_message_token_ranges helper
 # =============================================================================
 
 # Chat-template compatibility shims. Mirrors
@@ -296,7 +296,7 @@ def compute_message_token_ranges(
     continue_final_message: bool = False,
     start_from: int = 0,
 ) -> list[tuple[int, int]]:
-    """Per-message token ranges via incremental re-tokenization (RESEARCH Finding 7).
+    """Per-message token ranges via incremental re-tokenization.
 
     When ``start_from > 0``, skips the first ``start_from`` prefixes and fills
     those positions with ``(0, 0)`` sentinels.  A single boundary
@@ -493,6 +493,11 @@ class SessionTracker:
         self._cumulative_evictable_tokens = 0
         # Accumulated history (for re-classifier helpers that need full context).
         self._all_messages: list[dict] = []
+        # Per-tool eviction: monotonic round counter. Incremented once per
+        # assistant message (one agent action) in the per-message turn build;
+        # every TurnState created for that action shares the round. N-decay
+        # counts these rounds rather than raw turn indices.
+        self._round_counter = 0
 
     # ----- Robustness: reused/reset session_id detection ----------------
     def is_diverged(self, structured_messages: list) -> bool:
@@ -583,15 +588,40 @@ class SessionTracker:
             f"message_token_ranges length {len(message_token_ranges)} "
             f"must equal messages length {len(structured_messages)}"
         )
-        if structured_messages:
-            assert (
-                len(prompt_token_ids) == 0
-                or message_token_ranges[-1][1] == len(prompt_token_ids)
-            ), (
-                f"final range end {message_token_ranges[-1][1]} must equal "
-                f"len(prompt_token_ids) {len(prompt_token_ids)} "
-                "(RESEARCH Finding 7)"
-            )
+        # The incremental per-message render in compute_message_token_ranges
+        # under-counts a TRAILING run of consecutive `tool` messages: Qwen merges
+        # them into a single <tool_response> block whose close
+        # (`</tool_response><|im_end|>`) and the add_generation_prompt suffix
+        # (`<|im_start|>assistant<think>`) fall outside every per-message prefix diff.
+        # That left ranges[-1][1] < len(prompt_token_ids), which used
+        # to trip a HARD assert and drop EVERY post-tool turn (n_turns stuck 0).
+        # Instead, snap the final message's range end up to the engine length so
+        # cumulative accounting is exact. The snapped residual is structural
+        # scaffolding (+ merge-boundary slack); it is recorded in the turn's
+        # token_range but kept OUT of the evictable obs span -- see the
+        # `_snap_unsnapped_end` cap in the obs_token_range loop below. An
+        # OVER-count (ranges claim more than the engine produced) is a genuine
+        # alignment bug, not this undercount, so it keeps the hard guard.
+        _snap_unsnapped_end: int | None = None
+        if structured_messages and prompt_token_ids:
+            _last_start, _last_end = message_token_ranges[-1]
+            _engine_len = len(prompt_token_ids)
+            if _last_end < _engine_len:
+                message_token_ranges = list(message_token_ranges)
+                _snap_unsnapped_end = _last_end
+                message_token_ranges[-1] = (_last_start, _engine_len)
+                logger.debug(
+                    "agent_tracker: snapped final range %d->%d for sid=%s "
+                    "(trailing tool-block scaffolding; +%d tokens recorded in "
+                    "token_range but excluded from obs span)",
+                    _last_end, _engine_len, self.session_id,
+                    _engine_len - _last_end,
+                )
+            else:
+                assert _last_end == _engine_len, (
+                    f"final range end {_last_end} exceeds "
+                    f"len(prompt_token_ids) {_engine_len}"
+                )
 
         # D-10: compute / verify the dynamic no-evict zone.
         if self.no_evict_zone_tokens is None:
@@ -644,183 +674,148 @@ class SessionTracker:
             logger.info("agent_tracker: %s", payload)
             return payload
 
-        # Replay through extract_new_messages on the FULL message list (the
-        # offline algorithm groups consecutive new messages by role-pattern).
-        prev_all = self._all_messages
+        # Accumulate full history for the re-classifier / is_diverged helpers.
         self._all_messages = list(structured_messages)
-        # extract_new_messages expects "entries" with cumulative `messages` per
-        # turn. We synthesize one entry whose messages are the full prior
-        # context, then a second entry whose messages are the full new context.
-        # The result is grouped[1] = the new messages of this request; we
-        # combine with prior turn-grouping by re-running on the cumulative
-        # turn-by-turn view via a minimal synthetic structure.
-        #
-        # In practice the live tracker tracks groups by walking the message
-        # list in the same order the offline build_turn_states does: each
-        # logical "turn group" corresponds to a contiguous block of new
-        # messages between two natural boundaries (user task / assistant /
-        # tool). For per-request incremental processing, we treat the entire
-        # block of new messages as ONE turn group (matches offline's behavior
-        # when extract_new_messages returns one entry per chat-completion
-        # call). This preserves the parity with the offline classifier whose
-        # `entries` are JSONL rows -- one per chat completion.
         new_msgs_block = structured_messages[self.prev_msg_count:]
+        new_turn_indices: list[int] = []
 
-        # --- BUILD NEW TURN(S) (incremental port of build_turn_states) ----
-        # The offline algorithm processes one "entry" at a time; for the live
-        # tracker, each observe_request call corresponds to one entry, so we
-        # have at most ONE new turn-group per call (mirrors the JSONL row
-        # structure that build_turn_states walks).
+        # --- PER-MESSAGE TURN BUILD (per-tool eviction, 2026-06-23) ---------
+        # Emit one TurnState per NEW message instead of collapsing the whole
+        # [assistant, tool, tool, ...] block into a single turn. Each
+        # tool/function message becomes its OWN independently-evictable
+        # observation (own obs_token_range / obs_hash / files); each assistant
+        # tool-call becomes an always-essential anchor that opens a new decay
+        # ROUND. Reuses the offline per-message classifier + file extractor;
+        # downstream supersession / decay / serialization stay per-TurnState.
         if new_msgs_block:
-            # Retroactively trim the prior turn's token_range[1] to the
-            # scaffolding-free end of its boundary message. The prior
-            # request rendered that message as ITS final iteration (so the
-            # +5 add_generation_prompt suffix was absorbed into its end);
-            # this request renders the same message non-finally, exposing
-            # the natural end. Without this trim, persisted turn ranges
-            # overlap by ~5 tokens at every cross-request boundary.
+            # Cross-request boundary trim (unchanged): the prior request rendered
+            # its final message WITH the +gen-prompt suffix; this request renders
+            # that same message non-finally, exposing the natural end. Trim the
+            # prior request's last turn so persisted ranges don't overlap. Skip
+            # on a LARGE backward jump (a last_query_index frame rebase, not a
+            # scaffolding adjustment) to keep the prior range internally monotonic.
             if self.prev_msg_count > 0 and self.evictable_map:
                 prev_ts = self.evictable_map[-1]
                 natural_end = message_token_ranges[self.prev_msg_count - 1][1]
                 old_start, old_end = prev_ts.token_range
-                # Guard: only fire the +5-style trim when it preserves
-                # monotonicity. A LARGE backward jump (natural_end < old_start)
-                # indicates a chat-template `last_query_index` flip rebased the
-                # frame -- not a scaffolding adjustment -- and applying the
-                # trim would corrupt the prior turn's range. Leave the prior
-                # turn alone in that case; its absolute frame is stale but at
-                # least internally monotonic.
                 if natural_end < old_end and natural_end >= old_start:
                     delta = old_end - natural_end
                     prev_ts.token_range = (old_start, natural_end)
                     prev_ts.token_count = max(0, prev_ts.token_count - delta)
-                    # Drain the trimmed tokens from whichever per-category
-                    # bucket they were attributed to (the "other" bucket is
-                    # the residual catch-all; fall through to it).
                     for fld in ("observation_tokens", "reasoning_tokens",
                                 "tool_call_tokens", "other_tokens"):
                         v = getattr(prev_ts, fld)
                         if v >= delta:
                             setattr(prev_ts, fld, v - delta)
                             break
-            cumulative_msg_idx = self.prev_msg_count
-            group_end = len(structured_messages)
-            msg_range = (cumulative_msg_idx, group_end)
-            token_range = (
-                message_token_ranges[cumulative_msg_idx][0],
-                message_token_ranges[group_end - 1][1],
-            )
 
-            # Option B: skip non-monotonic turn. Qwen3.6's chat template strips
-            # `<think>` blocks from prior assistants when a new non-tool-response
-            # user msg becomes `last_query_index`, which can make
-            # cum_len(prefix[:n+1]) < cum_len(prefix[:n]) and yield
-            # token_range[1] < token_range[0]. Append-skip + advance prev_msg_count
-            # so subsequent turns chain forward in the new (post-flip) frame.
-            if token_range[1] < token_range[0]:
-                logger.warning(
-                    "agent_tracker: skipping non-monotonic turn for sid=%s "
-                    "turn_idx=%d msg_range=%s token_range=(%d,%d) "
-                    "(chat-template last_query_index flip stripped prior <think>)",
-                    self.session_id, len(self.evictable_map), msg_range,
-                    token_range[0], token_range[1],
+            final_idx = len(structured_messages) - 1
+            for j in range(self.prev_msg_count, len(structured_messages)):
+                msg = structured_messages[j]
+                role = msg.get("role")
+                seg_start, seg_end = message_token_ranges[j]
+
+                # Per-message non-monotonic guard: a chat-template
+                # last_query_index flip can make this prefix shorter than the
+                # previous one (end < start). Skip THIS turn but keep walking so
+                # later messages still chain forward in the post-flip frame.
+                if seg_end < seg_start:
+                    logger.warning(
+                        "agent_tracker: skipping non-monotonic msg turn for "
+                        "sid=%s msg_idx=%d range=(%d,%d) (last_query_index flip)",
+                        self.session_id, j, seg_start, seg_end,
+                    )
+                    continue
+
+                # Round bookkeeping: each assistant message is a new agent
+                # action -> a new round; tool results inherit the current round.
+                if role == "assistant":
+                    self._round_counter += 1
+                cur_round = self._round_counter
+
+                # Classify just this message (single-element block) so each tool
+                # gets its OWN category/command/files resolved by tool_call_id.
+                prefix = structured_messages[:j]
+                one = [msg]
+                category, command = _classify_new_messages(one, prefix)
+                files_full = _extract_files_from_messages(one, prefix)
+                files_basenames = {f.split("/")[-1] for f in files_full}
+
+                token_range = (seg_start, seg_end)
+                token_count = seg_end - seg_start
+                obs_tokens = (
+                    token_count if category in _OBSERVATION_CATEGORIES else 0
                 )
-                # Advance prev_msg_count so the next observe sees correct
-                # alignment, but do NOT append to evictable_map / file_timeline
-                # / run reclassification for this turn.
-                self.prev_msg_count = len(structured_messages)
-                self._apply_n_decay()
-                self._enforce_no_evict_zone_floor()
-                payload = self._build_log_payload(
-                    new_msgs_count=new_msgs_count,
-                    new_evictable_tokens=0,
-                    exact_match_hit=False,
-                    latency_ms=(time.monotonic() - t0) * 1000.0,
+                reasoning_tokens = (
+                    token_count if category == MSA_AGENT_REASONING else 0
                 )
-                logger.info("agent_tracker: %s", payload)
-                return payload
+                tool_call_tokens = (
+                    token_count if category == MSA_AGENT_TOOL_CALL else 0
+                )
+                other_tokens = (
+                    token_count - obs_tokens - reasoning_tokens - tool_call_tokens
+                )
 
-            turn_idx = len(self.evictable_map)
-
-            # Reuse offline _classify_new_messages for category + command.
-            category, command = _classify_new_messages(
-                new_msgs_block, self._all_messages,
-            )
-            files_full = _extract_files_from_messages(
-                new_msgs_block, prev_all,
-            )
-            files_basenames = {f.split("/")[-1] for f in files_full}
-
-            # Token counts -- replace count_tokens with token_range slicing.
-            token_count = token_range[1] - token_range[0]
-            obs_tokens = (
-                token_count if category in _OBSERVATION_CATEGORIES else 0
-            )
-            reasoning_tokens = (
-                token_count if category == MSA_AGENT_REASONING else 0
-            )
-            tool_call_tokens = (
-                token_count if category == MSA_AGENT_TOOL_CALL else 0
-            )
-            other_tokens = (
-                token_count - obs_tokens - reasoning_tokens - tool_call_tokens
-            )
-
-            # Observation-message hash (D-11): hash the OBSERVATION message's
-            # tokens. For tool/function role messages only.
-            obs_hash: bytes | None = None
-            obs_token_range: tuple[int, int] | None = None
-            for j in range(cumulative_msg_idx, group_end):
-                role = self._all_messages[j].get("role")
+                turn_idx = len(self.evictable_map)
+                obs_hash: bytes | None = None
+                obs_token_range: tuple[int, int] | None = None
                 if role in ("tool", "function"):
-                    seg_start, seg_end = message_token_ranges[j]
-                    obs_token_range = (seg_start, seg_end)
+                    o_start, o_end = seg_start, seg_end
+                    # Keep the snapped structural residual OUT of the evictable
+                    # obs span when this obs IS the snapped final message (the
+                    # snap inflates only message_token_ranges[final_idx]).
+                    if _snap_unsnapped_end is not None and j == final_idx:
+                        o_end = _snap_unsnapped_end
+                    obs_token_range = (o_start, o_end)
                     obs_hash = hash_token_sequence(
-                        prompt_token_ids[seg_start:seg_end]
+                        prompt_token_ids[o_start:o_end]
                     )
                     if obs_hash in self._all_obs_hashes_seen():
                         exact_match_hit = True
                     self.token_index.add(obs_hash, turn_idx)
-                    break  # one obs per turn-group is sufficient
 
-            ts = TurnState(
-                turn_idx=turn_idx,
-                category=category,
-                files_referenced=files_basenames,
-                files_referenced_full=files_full,
-                command=command or None,
-                is_edit=(category == MSA_TOOL_FILE_EDIT),
-                is_success=True,  # offline default; refined by reclassification
-                token_count=token_count,
-                observation_tokens=obs_tokens,
-                reasoning_tokens=reasoning_tokens,
-                tool_call_tokens=tool_call_tokens,
-                other_tokens=other_tokens,
-                evictable=False,
-                eviction_reason="essential",
-                superseded_by=None,
-                msg_range=msg_range,
-                token_range=token_range,
-                obs_token_range=obs_token_range,
-                obs_token_hash=obs_hash,
-            )
-            self.evictable_map.append(ts)
-            logger.debug(
-                "agent_tracker: turn %d category=%s msg_range=%s token_range=%s",
-                turn_idx, category, msg_range, token_range,
-            )
-
-            # Update FileTimeline (basename keys).
-            action = self._action_from_category(category)
-            for fp in files_full:
-                bn = fp.split("/")[-1]
-                self.file_timeline.append(
-                    basename=bn, turn_idx=turn_idx, action=action,
-                    msg_idx=cumulative_msg_idx, full_path=fp,
+                ts = TurnState(
+                    turn_idx=turn_idx,
+                    category=category,
+                    files_referenced=files_basenames,
+                    files_referenced_full=files_full,
+                    command=command or None,
+                    is_edit=(category == MSA_TOOL_FILE_EDIT),
+                    is_success=True,
+                    token_count=token_count,
+                    observation_tokens=obs_tokens,
+                    reasoning_tokens=reasoning_tokens,
+                    tool_call_tokens=tool_call_tokens,
+                    other_tokens=other_tokens,
+                    evictable=False,
+                    eviction_reason="essential",
+                    superseded_by=None,
+                    msg_range=(j, j + 1),
+                    token_range=token_range,
+                    obs_token_range=obs_token_range,
+                    obs_token_hash=obs_hash,
+                    round_idx=cur_round,
+                )
+                self.evictable_map.append(ts)
+                new_turn_indices.append(turn_idx)
+                logger.debug(
+                    "agent_tracker: turn %d round=%d role=%s category=%s "
+                    "token_range=%s obs=%s", turn_idx, cur_round, role,
+                    category, token_range, obs_token_range,
                 )
 
-            # --- D-08 RECLASSIFICATION: back-walk for this new turn -----
-            self._reclassify_priors_for_new_turn(turn_idx)
+                # Update FileTimeline (basename keys).
+                action = self._action_from_category(category)
+                for fp in files_full:
+                    bn = fp.split("/")[-1]
+                    self.file_timeline.append(
+                        basename=bn, turn_idx=turn_idx, action=action,
+                        msg_idx=j, full_path=fp,
+                    )
+
+                # D-08 supersession back-walk: an earlier observation can be
+                # superseded by a later read even within this same request.
+                self._reclassify_priors_for_new_turn(turn_idx)
 
         # --- D-09 N-DECAY (re-apply over ALL turns after new appends) ---
         self._apply_n_decay()
@@ -829,13 +824,9 @@ class SessionTracker:
         self._enforce_no_evict_zone_floor()
 
         # --- Stats -------------------------------------------------------
-        # New evictable tokens = tokens marked evictable on turns added in
-        # THIS request (i.e., turn indices >= the prior count of turns).
-        # Since this driver appends at most one new turn per call, the count
-        # of newly-added turns is `new_msgs_block` non-empty -> 1, else 0.
-        new_turn_indices = []
-        if new_msgs_block:
-            new_turn_indices.append(len(self.evictable_map) - 1)
+        # New evictable tokens = tokens marked evictable on turns added in THIS
+        # request (per-message build appends one turn per new message; their
+        # indices were collected in new_turn_indices above).
         new_evictable_tokens = sum(
             self.evictable_map[i].token_count
             for i in new_turn_indices
@@ -912,6 +903,12 @@ class SessionTracker:
             return
         for prior_idx in range(new_turn_idx):
             prior = self.evictable_map[prior_idx]
+            # Per-tool eviction: only OBSERVATION turns are actually evictable
+            # (serving.py drops obs_token_range). Anchors / reasoning / user /
+            # system turns have obs_token_range=None and drop nothing, so never
+            # flag them evictable -- it would only inflate evictable_pct.
+            if prior.obs_token_range is None:
+                continue
             if not prior.files_referenced:
                 continue
             # Correction (1): preserve the FIRST (earliest) supersedor.
@@ -936,31 +933,26 @@ class SessionTracker:
                     prior.superseded_by = new_turn_idx
 
     def _apply_n_decay(self) -> None:
-        """D-09 N-decay heuristic. AGENT_TOOL_CALL turns are preserved as
-        anchors per Phase 01.3 finding (`STATE.md`: 'Do NOT evict Agent tool
-        call records (28.2% budget) -- they are segment anchors').
-
-        D-19 PARITY (debug round 4, 2026-04-28): mirror the offline
-        decay logic in `scripts/trajectory_classifier.py:544-585`. The
-        original live implementation skipped the file-overlap-in-window
-        check, causing OVER-DECAY of turns whose files are still being
-        actively referenced in the next n_decay turns.
+        """
+        ROUND-AWARE (per-tool eviction): once each tool message is
+        its own turn, a single agent action (assistant + N parallel tool
+        results) spans N+1 turns. Counting the decay window in RAW turns would
+        let one parallel-tool burst exhaust the lookahead. So the window and the
+        tail guard count ROUNDS (TurnState.round_idx) instead -- preserving the
+        pre-split horizon (one request ~ one round).
 
         For each turn that survived supersession (not already evictable):
-          - Tail guard: spare turns whose `i + n_decay >= n` (these are
-            the most recent few; offline uses `(i + n_decay) < len(states)`).
-          - Category gate: only OBSERVATION + AGENT_REASONING decay
-            (matches offline -- SYSTEM/USER/AGENT_TOOL_CALL never decay,
-            tool-call records are anchors).
-          - File-window check: if the turn references files AND any of
-            those files appears in `[i+1, i+n_decay]`, do NOT decay
-            (the file is still relevant to the active investigation).
-          - No-files turns (e.g. test runs, build outputs with no
-            specific path) decay purely by turn count.
+          - Obs gate: only turns with an obs_token_range are actually evictable
+            (eviction drops obs_token_range); skip anchors/reasoning.
+          - Tail guard: spare turns within the last n_decay ROUNDS.
+          - File-window check: if the turn references files AND any of those
+            files appears in a LATER round within n_decay rounds, do NOT decay.
+          - No-files obs turns (e.g. test runs) decay purely by round count.
         """
         n = len(self.evictable_map)
         states = self.evictable_map.all_turns()
         n_decay = self.n_decay
+        max_round = states[-1].round_idx if states else 0
         for i, ts in enumerate(states):
             if ts.evictable:
                 continue
@@ -968,11 +960,13 @@ class SessionTracker:
                 continue
             if ts.category in (MSA_SYSTEM_PROMPT, MSA_USER_TASK):
                 continue
-            # Tail guard (mirror offline `(i + n_decay) < len(states)`).
-            if (i + n_decay) >= n:
+            # Only turns with an actual observation can be evicted (serving.py
+            # drops obs_token_range); reasoning/anchor turns drop nothing.
+            if ts.obs_token_range is None:
                 continue
-            # Only observation + reasoning categories decay (mirror offline
-            # branch structure at lines 523, 568).
+            # Round-aware tail guard: spare turns within the last n_decay rounds.
+            if ts.round_idx + n_decay > max_round:
+                continue
             if (
                 ts.category not in _OBSERVATION_CATEGORIES
                 and ts.category != MSA_AGENT_REASONING
@@ -980,8 +974,14 @@ class SessionTracker:
                 continue
             if ts.files_referenced:
                 referenced_in_window = False
-                for j in range(i + 1, min(i + n_decay + 1, n)):
+                for j in range(i + 1, n):
                     later = states[j]
+                    # Same-round siblings are the SAME action, not a future
+                    # reference; stop once we pass the n_decay-round window.
+                    if later.round_idx <= ts.round_idx:
+                        continue
+                    if later.round_idx > ts.round_idx + n_decay:
+                        break
                     if _files_overlap(
                         ts.files_referenced, later.files_referenced,
                         ts.files_referenced_full,
@@ -993,8 +993,7 @@ class SessionTracker:
                     ts.evictable = True
                     ts.eviction_reason = "decayed_N_turns"
             else:
-                # No files referenced -- pure turn-decay
-                # (e.g. test runs, build outputs).
+                # No files referenced -- pure round-decay (e.g. test runs).
                 ts.evictable = True
                 ts.eviction_reason = "decayed_N_turns"
 

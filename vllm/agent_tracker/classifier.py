@@ -281,13 +281,19 @@ _STRUCT_SEARCH_KEYS = ("grep", "ripgrep", "glob", "search", "find", "locate",
                        "list_dir", "list_files", "listdir", "tree")
 _STRUCT_READ_KEYS = ("read", "view", "cat", "open_file", "openfile", "show_file",
                      "get_file", "getfile", "fileread", "read_file")
+# Code-execution tools that carry a `code` arg (not a `command`), so they miss
+# the bash path entirely. Hermes `execute_code` is the canonical case. Checked
+# LAST so file tools whose names happen to contain "run"/"exec" still win.
+_STRUCT_EXEC_KEYS = ("execute_code", "run_code", "code_exec", "code_interpreter",
+                     "python_exec", "ipython", "jupyter", "execute", "run_python")
 
 
 def classify_structured_tool(fn_name: str) -> str:
     """Categorize a structured (non-bash) tool call by its function name.
 
-    Returns one of MSA_TOOL_FILE_{EDIT,SEARCH,READ} or "" when the name is not a
-    recognized file tool (caller then falls back to MSA_TOOL_OTHER).
+    Returns one of MSA_TOOL_FILE_{EDIT,SEARCH,READ}, MSA_TOOL_RUN_EXEC, or ""
+    when the name is not a recognized tool (caller then falls back to
+    MSA_TOOL_OTHER).
     """
     n = (fn_name or "").strip().lower()
     if not n:
@@ -298,6 +304,8 @@ def classify_structured_tool(fn_name: str) -> str:
         return MSA_TOOL_FILE_SEARCH
     if any(k in n for k in _STRUCT_READ_KEYS):
         return MSA_TOOL_FILE_READ
+    if any(k in n for k in _STRUCT_EXEC_KEYS):
+        return MSA_TOOL_RUN_EXEC
     return ""
 
 
