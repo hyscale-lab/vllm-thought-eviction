@@ -34,6 +34,8 @@ from vllm.agent_tracker.classifier import (
     MSA_TOOL_OTHER,
     MSA_SYSTEM_PROMPT,
     MSA_USER_TASK,
+    DEDUPE_OUTPUT_CATEGORIES,
+    _MIN_DEDUPE_CHARS,
     _classify_new_messages,
     _extract_files_from_messages,
     _files_overlap,
@@ -41,10 +43,15 @@ from vllm.agent_tracker.classifier import (
     extract_new_messages,
     build_tool_call_command_map,
     classify_bash_command_minisweagent,
+    normalize_observation_text,
 )
 from vllm.agent_tracker.file_timeline import FileTimeline
 from vllm.agent_tracker.segment_map import EvictableSegmentMap, TurnState
-from vllm.agent_tracker.token_index import TokenSequenceIndex, hash_token_sequence
+from vllm.agent_tracker.token_index import (
+    TokenSequenceIndex,
+    hash_text,
+    hash_token_sequence,
+)
 
 logger = init_logger(__name__)
 
@@ -483,6 +490,11 @@ class SessionTracker:
         self.file_timeline = FileTimeline()
         self.evictable_map = EvictableSegmentMap()
         self.token_index = TokenSequenceIndex()
+        # Content-hash dedupe of repeated command output (findings §5): maps the
+        # normalized-text digest of a run/exec / other-bash observation to the
+        # turn indices that produced it, so a later identical-after-normalization
+        # rerun can supersede the earlier copies.
+        self._norm_hash_index: dict[bytes, list[int]] = {}
         self.last_active = time.monotonic()
         # D-10: dynamic per-session no-evict zone. Computed on first
         # observe_request, locked thereafter. NOT a hardcoded constant -- the
@@ -759,6 +771,7 @@ class SessionTracker:
                 turn_idx = len(self.evictable_map)
                 obs_hash: bytes | None = None
                 obs_token_range: tuple[int, int] | None = None
+                obs_norm_hash: bytes | None = None
                 if role in ("tool", "function"):
                     o_start, o_end = seg_start, seg_end
                     # Keep the snapped structural residual OUT of the evictable
@@ -773,6 +786,13 @@ class SessionTracker:
                     if obs_hash in self._all_obs_hashes_seen():
                         exact_match_hit = True
                     self.token_index.add(obs_hash, turn_idx)
+                    # Content-hash dedupe key (run/exec + other-bash only):
+                    # hash the NORMALIZED observation text so reruns that differ
+                    # only in timing/addresses/tmp-paths collapse to one digest.
+                    if category in DEDUPE_OUTPUT_CATEGORIES:
+                        norm = normalize_observation_text(_message_text(msg))
+                        if len(norm) >= _MIN_DEDUPE_CHARS:
+                            obs_norm_hash = hash_text(norm)
 
                 ts = TurnState(
                     turn_idx=turn_idx,
@@ -794,6 +814,7 @@ class SessionTracker:
                     token_range=token_range,
                     obs_token_range=obs_token_range,
                     obs_token_hash=obs_hash,
+                    obs_norm_hash=obs_norm_hash,
                     round_idx=cur_round,
                 )
                 self.evictable_map.append(ts)
@@ -816,6 +837,9 @@ class SessionTracker:
                 # D-08 supersession back-walk: an earlier observation can be
                 # superseded by a later read even within this same request.
                 self._reclassify_priors_for_new_turn(turn_idx)
+
+                # --- Content-hash dedupe of repeated command output ---------
+                self._dedupe_repeated_output(turn_idx)
 
         # --- D-09 N-DECAY (re-apply over ALL turns after new appends) ---
         self._apply_n_decay()
@@ -931,6 +955,47 @@ class SessionTracker:
                     prior.evictable = True
                     prior.eviction_reason = "superseded_by_later_read"
                     prior.superseded_by = new_turn_idx
+
+    def _dedupe_repeated_output(self, new_turn_idx: int) -> None:
+        """Content-hash dedupe of repeated command output (findings doc §5).
+
+        Path-based supersession (`_reclassify_priors_for_new_turn`) only catches
+        re-reads/edits of the same FILE. The large un-deduped leak is re-running
+        the same script / test / `ls` whose OUTPUT is near-identical but is not
+        file content, so path overlap never fires; those copies survive on
+        time-decay alone. This method closes that gap for run/exec + other-bash
+        turns: when a new turn's normalized observation text matches an earlier
+        such turn's, the earlier copy is provably redundant and is marked
+        `superseded_by_repeat` + evictable, mirroring the `superseded_by_later_read`
+        path so the engine prefill filter, analysis, and viz pick it up.
+
+        Only the EARLIER copies are evicted (the most-recent rerun is kept), the
+        same keep-latest semantics as later-read supersession. Parity with
+        `_reclassify_priors_for_new_turn`'s correction (1): an existing
+        `superseded_by_*` attribution is preserved (first supersedor wins), while
+        `essential` and provisional `decayed_N_turns` marks are (re)attributed to
+        the repeat so the engine filter actually drops them.
+        """
+        new_ts = self.evictable_map[new_turn_idx]
+        if new_ts.category not in DEDUPE_OUTPUT_CATEGORIES:
+            return
+        nh = new_ts.obs_norm_hash
+        if nh is None:
+            return
+        for prior_idx in self._norm_hash_index.get(nh, ()):
+            prior = self.evictable_map[prior_idx]
+            if prior.evictable and prior.eviction_reason in (
+                "superseded_by_later_read",
+                "superseded_by_edit",
+                "superseded_by_repeat",
+            ):
+                continue
+            prior.evictable = True
+            prior.eviction_reason = "superseded_by_repeat"
+            prior.superseded_by = new_turn_idx
+        # Register this turn as the newest producer of `nh` so the next rerun
+        # supersedes it in turn.
+        self._norm_hash_index.setdefault(nh, []).append(new_turn_idx)
 
     def _apply_n_decay(self) -> None:
         """

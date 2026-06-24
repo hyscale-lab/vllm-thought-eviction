@@ -34,6 +34,21 @@ def hash_token_sequence(token_ids: list[int]) -> bytes:
     return h.digest()
 
 
+def hash_text(text: str) -> bytes:
+    """64-bit blake2b digest of a (already-normalized) text string.
+
+    Companion to hash_token_sequence for content-hash dedupe of repeated
+    command output (findings doc §5): the dedupe keys on NORMALIZED observation
+    TEXT (timestamps/paths/whitespace scrubbed) rather than raw token ids, so
+    near-identical reruns collapse to one digest. Same stdlib-only, 8-byte,
+    cross-version-deterministic guarantees as hash_token_sequence.
+    """
+    h = hashlib.blake2b(digest_size=8)
+    if text:
+        h.update(text.encode("utf-8"))
+    return h.digest()
+
+
 class TokenSequenceIndex:
     """`hash_token_sequence(observation_tokens) -> [turn_idx]` (D-07).
 

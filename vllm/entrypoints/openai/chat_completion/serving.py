@@ -361,11 +361,16 @@ class OpenAIServingChat(OpenAIServing):
                     if opp and opp.get("turns"):
                         drop_indices = set()
                         for turn in opp["turns"]:
-                            if turn.get("evictable") and turn.get("reason", "") == "superseded_by_later_read":
+                            if turn.get("evictable") and turn.get("reason", "") in (
+                                "superseded_by_later_read", "superseded_by_repeat"
+                            ):
                                 # The tracker groups assistant (reasoning + tool call) and tool (output)
                                 # messages into a single turn. To preserve the agent's trajectory,
                                 # we ONLY drop the tool output tokens (obs_token_range), leaving the
-                                # assistant's reasoning and tool call intact.
+                                # assistant's reasoning and tool call intact. Both supersession
+                                # reasons evict only redundant observations: later-read = a newer
+                                # read of the same file; repeat = a newer run/exec / other-bash turn
+                                # whose normalized output is identical (content-hash dedupe).
                                 obs_range = turn.get("obs_token_range")
                                 if obs_range:
                                     start_tok, end_tok = obs_range
