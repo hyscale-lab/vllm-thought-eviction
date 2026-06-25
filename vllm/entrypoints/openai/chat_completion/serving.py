@@ -81,7 +81,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.thought_eviction.orchestrator import EvictionOrchestrator
 from vllm.agent_tracker.metrics import record_filter as _record_eviction_filter
 from vllm.agent_tracker.metrics import record_eviction_rounds as _record_eviction_rounds
-from vllm.agent_tracker.classifier import MSA_AGENT_TOOL_CALL as _MSA_AGENT_TOOL_CALL
+from vllm.agent_tracker.classifier import AGENT_TOOL_CALL as _AGENT_TOOL_CALL
 from vllm.agent_tracker.tracker import (
     compute_message_token_ranges,
     get_session_tracker_registry,
@@ -395,7 +395,7 @@ class OpenAIServingChat(OpenAIServing):
                         for rnd_turns in rounds.values():
                             tool_call_turns = [
                                 t for t in rnd_turns
-                                if t.get("category") == _MSA_AGENT_TOOL_CALL
+                                if t.get("category") == _AGENT_TOOL_CALL
                             ]
                             result_turns = [
                                 t for t in rnd_turns if t.get("obs_token_range")

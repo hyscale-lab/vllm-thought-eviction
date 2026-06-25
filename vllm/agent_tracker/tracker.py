@@ -23,25 +23,21 @@ from typing import Any
 from vllm.logger import init_logger
 
 from vllm.agent_tracker.classifier import (
-    K_DEFAULTS,
-    MSA_AGENT_REASONING,
-    MSA_AGENT_TOOL_CALL,
-    MSA_TOOL_FILE_READ,
-    MSA_TOOL_FILE_EDIT,
-    MSA_TOOL_FILE_SEARCH,
-    MSA_TOOL_TEST_RUN,
-    MSA_TOOL_BUILD_INSTALL,
-    MSA_TOOL_RUN_EXEC,
-    MSA_TOOL_OTHER,
-    MSA_SYSTEM_PROMPT,
-    MSA_USER_TASK,
+    AGENT_REASONING,
+    AGENT_TOOL_CALL,
+    TOOL_FILE_READ,
+    TOOL_FILE_EDIT,
+    TOOL_FILE_SEARCH,
+    TOOL_TEST_RUN,
+    TOOL_BUILD_INSTALL,
+    TOOL_RUN_EXEC,
+    TOOL_OTHER,
+    SYSTEM_PROMPT,
+    USER_TASK,
+    OBSERVATION_CATEGORIES,
     _classify_new_messages,
     _extract_files_from_messages,
     _files_overlap,
-    _is_path_suffix,
-    extract_new_messages,
-    build_tool_call_command_map,
-    classify_bash_command_minisweagent,
 )
 from vllm.agent_tracker.file_timeline import FileTimeline
 from vllm.agent_tracker.segment_map import EvictableSegmentMap, TurnState
@@ -263,8 +259,8 @@ def _message_text(msg: Any) -> str:
 
 def _framing_signature(messages: list) -> tuple:
     """Signature of a conversation's IMMUTABLE framing prefix: the leading
-    role=system block plus the FIRST role=user message. Agents (mini-swe-agent /
-    Hermes) hold this constant across a conversation while appending only
+    role=system block plus the FIRST role=user message. Coding agents (Hermes /
+    OpenClaw) hold this constant across a conversation while appending only
     assistant/tool turns, so the signature is identical on every turn of a given
     conversation but differs between distinct ones. Used to detect a session_id
     reused by a genuinely different conversation (see SessionTracker.is_diverged).
@@ -327,7 +323,7 @@ def compute_message_token_ranges(
     (b) When a prefix has no non-tool-response user message, the template
         raises 'No user query found in messages.' at the `last_query_index`
         check (chat_template.jinja:67-80). The very first iteration (i=1,
-        messages[:1] = [system]) always trips this for mini-swe-agent. We
+        messages[:1] = [system]) always trips this for a system-first agent. We
         inject a placeholder user message after any leading system block when
         a prefix lacks a user, render the augmented prefix, and subtract a
         precomputed placeholder overhead so the running length matches what
@@ -541,7 +537,7 @@ class SessionTracker:
     ) -> int:
         """D-10: sum token-range lengths of role=system messages plus the FIRST
         role=user message. Called only once, on the session's first
-        observe_request invocation. mini-swe-agent appends only assistant/tool
+        observe_request invocation. The agent appends only assistant/tool
         after the first user message, so the value is stable for the session.
         """
         first_user_seen = False
@@ -553,7 +549,7 @@ class SessionTracker:
             elif role == "user" and not first_user_seen:
                 total += (end - start)
                 first_user_seen = True
-                break  # mini-swe-agent appends only assistant/tool after the first user message
+                break  # the agent appends only assistant/tool after the first user message
         return total
 
     # ----- Public entry point -------------------------------------------
@@ -745,13 +741,13 @@ class SessionTracker:
                 token_range = (seg_start, seg_end)
                 token_count = seg_end - seg_start
                 obs_tokens = (
-                    token_count if category in _OBSERVATION_CATEGORIES else 0
+                    token_count if category in OBSERVATION_CATEGORIES else 0
                 )
                 reasoning_tokens = (
-                    token_count if category == MSA_AGENT_REASONING else 0
+                    token_count if category == AGENT_REASONING else 0
                 )
                 tool_call_tokens = (
-                    token_count if category == MSA_AGENT_TOOL_CALL else 0
+                    token_count if category == AGENT_TOOL_CALL else 0
                 )
                 other_tokens = (
                     token_count - obs_tokens - reasoning_tokens - tool_call_tokens
@@ -781,7 +777,7 @@ class SessionTracker:
                     files_referenced=files_basenames,
                     files_referenced_full=files_full,
                     command=command or None,
-                    is_edit=(category == MSA_TOOL_FILE_EDIT),
+                    is_edit=(category == TOOL_FILE_EDIT),
                     is_success=True,
                     token_count=token_count,
                     observation_tokens=obs_tokens,
@@ -860,13 +856,13 @@ class SessionTracker:
 
     def _action_from_category(self, category: str) -> str:
         return {
-            MSA_TOOL_FILE_READ: "read",
-            MSA_TOOL_FILE_EDIT: "edit",
-            MSA_TOOL_FILE_SEARCH: "search",
-            MSA_TOOL_TEST_RUN: "test",
-            MSA_TOOL_BUILD_INSTALL: "build",
-            MSA_TOOL_RUN_EXEC: "other",
-            MSA_TOOL_OTHER: "other",
+            TOOL_FILE_READ: "read",
+            TOOL_FILE_EDIT: "edit",
+            TOOL_FILE_SEARCH: "search",
+            TOOL_TEST_RUN: "test",
+            TOOL_BUILD_INSTALL: "build",
+            TOOL_RUN_EXEC: "other",
+            TOOL_OTHER: "other",
         }.get(category, "other")
 
     def _reclassify_priors_for_new_turn(self, new_turn_idx: int) -> None:
@@ -925,7 +921,7 @@ class SessionTracker:
                     prior.eviction_reason = "superseded_by_edit"
                     prior.superseded_by = new_turn_idx
                 elif new_ts.category in (
-                    MSA_TOOL_FILE_READ, MSA_TOOL_FILE_SEARCH,
+                    TOOL_FILE_READ, TOOL_FILE_SEARCH,
                 ):
                     # Correction (2): SEARCH is symmetric with READ for
                     # supersession (mirror offline line 535).
@@ -957,9 +953,9 @@ class SessionTracker:
         for i, ts in enumerate(states):
             if ts.evictable:
                 continue
-            if ts.category == MSA_AGENT_TOOL_CALL:
+            if ts.category == AGENT_TOOL_CALL:
                 continue
-            if ts.category in (MSA_SYSTEM_PROMPT, MSA_USER_TASK):
+            if ts.category in (SYSTEM_PROMPT, USER_TASK):
                 continue
             # Only turns with an actual observation can be evicted (serving.py
             # drops obs_token_range); reasoning/anchor turns drop nothing.
@@ -969,8 +965,8 @@ class SessionTracker:
             if ts.round_idx + n_decay > max_round:
                 continue
             if (
-                ts.category not in _OBSERVATION_CATEGORIES
-                and ts.category != MSA_AGENT_REASONING
+                ts.category not in OBSERVATION_CATEGORIES
+                and ts.category != AGENT_REASONING
             ):
                 continue
             if ts.files_referenced:
@@ -1093,19 +1089,6 @@ class SessionTracker:
             ],
             "file_timeline": self.file_timeline.to_dict(),
         }
-
-
-# Observation categories (tool outputs); mirrors classifier._OBSERVATION_CATEGORIES
-# but kept here to avoid a private-name import.
-_OBSERVATION_CATEGORIES = {
-    MSA_TOOL_FILE_READ,
-    MSA_TOOL_FILE_EDIT,
-    MSA_TOOL_FILE_SEARCH,
-    MSA_TOOL_TEST_RUN,
-    MSA_TOOL_BUILD_INSTALL,
-    MSA_TOOL_RUN_EXEC,
-    MSA_TOOL_OTHER,
-}
 
 
 # =============================================================================
