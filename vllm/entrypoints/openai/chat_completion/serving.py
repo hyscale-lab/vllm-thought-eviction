@@ -351,6 +351,9 @@ class OpenAIServingChat(OpenAIServing):
                 registry.observe_request(
                     session_id=sid,
                     n_decay=getattr(request.agent_tracker, "n_decay", None),
+                    dedupe_cmd_output=getattr(
+                        request.agent_tracker, "dedupe_cmd_output", None
+                    ),
                     structured_messages=materialized_messages,
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,
@@ -382,41 +385,46 @@ class OpenAIServingChat(OpenAIServing):
                                     drop_indices.update(range(start_tok, end_tok))
                                     evicted_turn_idxs.append(turn.get("turn_idx"))
                                     evicted_obs_turns.add(turn.get("turn_idx"))
-                        # Pass 2: also drop the paired assistant "Agent tool call"
-                        # turn when EVERY tool-result turn in its round is being
-                        # evicted -- otherwise dropping just the results would leave
-                        # the tool_call without a response (a dangling tool call in
-                        # the prefill). An assistant message can carry several
-                        # parallel tool_calls, so we keep it whenever ANY of its
-                        # results survives (else we'd orphan that surviving result).
-                        rounds: dict[int, list[dict]] = {}
-                        for turn in turns:
-                            rounds.setdefault(turn.get("round_idx"), []).append(turn)
-                        for rnd_turns in rounds.values():
-                            tool_call_turns = [
-                                t for t in rnd_turns
-                                if t.get("category") == _AGENT_TOOL_CALL
-                            ]
-                            result_turns = [
-                                t for t in rnd_turns if t.get("obs_token_range")
-                            ]
-                            if not tool_call_turns or not result_turns:
-                                continue
-                            if not all(
-                                t.get("turn_idx") in evicted_obs_turns
-                                for t in result_turns
-                            ):
-                                continue
-                            for tc in tool_call_turns:
-                                tr = tc.get("token_range")
-                                # Respect the no-evict zone: never drop an assistant
-                                # turn anchored below the floor (its early results may
-                                # have been above the floor and thus evicted).
-                                if not tr or tr[0] < no_evict_floor:
+                        # Pass 2 (ABLATION, gated on evict_tool_call): also drop
+                        # the paired assistant "Agent tool call" turn when EVERY
+                        # tool-result turn in its round is being evicted -- otherwise
+                        # dropping just the results would leave the tool_call without
+                        # a response (a dangling tool call in the prefill). An
+                        # assistant message can carry several parallel tool_calls, so
+                        # we keep it whenever ANY of its results survives (else we'd
+                        # orphan that surviving result). Off by default: the n_decay /
+                        # supersession arms reclaim only tool OUTPUT tokens; the
+                        # `droptc` arm sets evict_tool_call to measure the marginal
+                        # effect of also reclaiming the call.
+                        if getattr(request.agent_tracker, "evict_tool_call", False):
+                            rounds: dict[int, list[dict]] = {}
+                            for turn in turns:
+                                rounds.setdefault(turn.get("round_idx"), []).append(turn)
+                            for rnd_turns in rounds.values():
+                                tool_call_turns = [
+                                    t for t in rnd_turns
+                                    if t.get("category") == _AGENT_TOOL_CALL
+                                ]
+                                result_turns = [
+                                    t for t in rnd_turns if t.get("obs_token_range")
+                                ]
+                                if not tool_call_turns or not result_turns:
                                     continue
-                                start_tok, end_tok = tr
-                                drop_indices.update(range(start_tok, end_tok))
-                                evicted_turn_idxs.append(tc.get("turn_idx"))
+                                if not all(
+                                    t.get("turn_idx") in evicted_obs_turns
+                                    for t in result_turns
+                                ):
+                                    continue
+                                for tc in tool_call_turns:
+                                    tr = tc.get("token_range")
+                                    # Respect the no-evict zone: never drop an assistant
+                                    # turn anchored below the floor (its early results may
+                                    # have been above the floor and thus evicted).
+                                    if not tr or tr[0] < no_evict_floor:
+                                        continue
+                                    start_tok, end_tok = tr
+                                    drop_indices.update(range(start_tok, end_tok))
+                                    evicted_turn_idxs.append(tc.get("turn_idx"))
                         if drop_indices:
                             # Use prompt_token_ids which is guaranteed to be extracted correctly
                             old_tokens = prompt_token_ids

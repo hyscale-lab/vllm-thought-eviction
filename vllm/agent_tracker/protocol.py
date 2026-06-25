@@ -29,8 +29,21 @@ class AgentTrackerParams(OpenAIBaseModel):
     # D-09: per-session N-decay tail-guard window (rounds). When set, overrides
     # the SessionTracker default (3). Higher = more conservative (spares more
     # recent rounds before decay-evicting). Swept per-arm via the client's
-    # AGENT_TRACKER_N_DECAY knob; None keeps the server default.
-    n_decay: int | None = Field(default=None, ge=1, le=20)
+    # AGENT_TRACKER_N_DECAY knob; None keeps the server default. The upper bound
+    # is intentionally large so an arm can set n_decay >> trajectory length
+    # (e.g. 999) to effectively DISABLE time-decay and evict purely on
+    # supersession (superseded_by_later_read / _by_edit / _by_repeat).
+    n_decay: int | None = Field(default=None, ge=1, le=9999)
+    # Ablation: also drop the paired assistant "Agent tool call" turn when every
+    # tool-result turn in its round is evicted (serving.py Pass 2). Off by
+    # default so the n_decay/supersession arms drop only tool OUTPUT tokens; the
+    # `droptc` arm sets it to measure the marginal effect of reclaiming the call.
+    evict_tool_call: bool = Field(default=False)
+    # Ablation: content-hash dedupe of repeated command output (run/exec +
+    # other-bash). When set, a later turn whose normalized observation text
+    # matches an earlier such turn supersedes it (reason superseded_by_repeat).
+    # Per-session, locked at tracker creation like n_decay.
+    dedupe_cmd_output: bool = Field(default=False)
 
 
 class TurnOpportunity(OpenAIBaseModel):
@@ -38,7 +51,7 @@ class TurnOpportunity(OpenAIBaseModel):
     turn_idx: int
     category: str
     evictable: bool
-    reason: str  # essential | superseded_by_edit | superseded_by_later_read | decayed_N_turns
+    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_repeat | decayed_N_turns
     msg_range: tuple[int, int]
     token_range: tuple[int, int]
     obs_token_range: tuple[int, int] | None = None

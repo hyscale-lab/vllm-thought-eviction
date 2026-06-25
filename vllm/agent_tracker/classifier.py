@@ -462,6 +462,64 @@ OBSERVATION_CATEGORIES = {
     TOOL_OTHER,
 }
 
+# Categories eligible for content-hash dedupe of REPEATED command output
+# (findings doc §5 primary recommendation). Path-based supersession
+# (superseded_by_later_read / _by_edit) already covers file reads/edits; the
+# un-deduped leak is re-running the same script / test / `ls` whose output is
+# near-identical but is NOT file content, so path overlap never fires. Restricted
+# to run/exec + other-bash: test/build runs are intentionally LEFT OUT because a
+# rerun whose output is byte-identical-after-normalization is exactly what we
+# would WANT to keep distinguishable for the agent's reasoning; run/exec +
+# other-bash are the high-volume, low-signal repeats (≈29-34% of tokens).
+DEDUPE_OUTPUT_CATEGORIES = {TOOL_RUN_EXEC, TOOL_OTHER}
+
+# Minimum normalized-text length before a run/exec / other-bash observation is
+# considered for dedupe. Tiny outputs (empty, a single prompt line, "OK") carry
+# negligible tokens and have a higher chance of coincidental collision, so we
+# skip them rather than risk evicting unrelated short outputs.
+_MIN_DEDUPE_CHARS = 40
+
+# Volatile-token scrubbers for content-hash dedupe. Each pattern replaces a class
+# of run-to-run-varying noise with a fixed placeholder so re-running the SAME
+# command (whose output differs only in timing / addresses / tmp names) collapses
+# to one normalized form. Patterns are deliberately NARROW: over-scrubbing would
+# collapse genuinely-different outputs and evict context the agent still needs.
+_NORM_PATTERNS = [
+    # ISO-8601 / log timestamps: 2026-06-24T12:34:56(.123)(Z|+08:00),
+    # 2026-06-24 12:34:56
+    (re.compile(
+        r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"
+        r"(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?"), "<TS>"),
+    # bare wall-clock times HH:MM:SS(.frac)
+    (re.compile(r"\b\d{2}:\d{2}:\d{2}(?:[.,]\d+)?\b"), "<TS>"),
+    # elapsed durations: "0.53s", "1.2 ms", "in 3.45 seconds", "12.3ms"
+    (re.compile(
+        r"\b\d+(?:\.\d+)?\s*"
+        r"(?:ms|s|sec|secs|seconds|min|mins|minutes|us|µs|ns)\b"), "<DUR>"),
+    # hex addresses / object ids: 0xdeadbeef, "at 0x7f1234"
+    (re.compile(r"\b0x[0-9a-fA-F]+\b"), "<ADDR>"),
+    # process-specific temp paths (pytest tmpdirs, mktemp): /tmp/..., /var/folders/...
+    (re.compile(r"/tmp/[\w./\-]+"), "<TMP>"),
+    (re.compile(r"/var/folders/[\w./\-]+"), "<TMP>"),
+]
+
+
+def normalize_observation_text(text: str) -> str:
+    """Normalize a command-output observation for repeat detection.
+
+    Strips the volatile noise (timestamps, elapsed durations, hex addresses,
+    process-temp paths) that makes two runs of the SAME command differ, then
+    collapses all whitespace. Two outputs that normalize to the same string are
+    treated as a repeat by the tracker's content-hash dedupe. Returns "" for
+    empty / whitespace-only input.
+    """
+    if not text:
+        return ""
+    out = text
+    for pat, repl in _NORM_PATTERNS:
+        out = pat.sub(repl, out)
+    return re.sub(r"\s+", " ", out).strip()
+
 
 def _classify_new_messages(new_msgs: list[dict], all_msgs_so_far: list[dict]) -> tuple[str, str]:
     """Determine the primary category of new messages and extract the bash command.

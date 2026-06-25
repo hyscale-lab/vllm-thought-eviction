@@ -33,6 +33,7 @@ class TurnState:
     token_range: tuple[int, int] = (0, 0)      # [start_token_idx, end_token_idx)
     obs_token_range: tuple[int, int] | None = None # [start_token_idx, end_token_idx) for observation message
     obs_token_hash: bytes | None = None        # blake2b digest of observation tokens (D-11)
+    obs_norm_hash: bytes | None = None          # blake2b digest of NORMALIZED obs text, run/exec + other-bash only (content-hash dedupe)
     # Per-tool eviction: the assistant-anchored ROUND this turn
     # One agent action (assistant completion + its tool results) =
     # one round; N-decay counts rounds, not raw turns, so a burst of parallel
