@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from typing import Any
 
 from vllm.logger import init_logger
@@ -1024,6 +1025,30 @@ class SessionTracker:
             "latency_ms": round(latency_ms, 2),
         }
 
+    def mark_evicted(self, turn_indices: Iterable[int]) -> list[int]:
+        """Record that ``turn_indices`` were dropped from the engine prefill on
+        the CURRENT request and return the rounds newly recorded (one per turn
+        whose ``evicted_at_round`` had not been set yet), for metrics.
+
+        The eviction round is the session's CURRENT round (the round_idx of the
+        most recently observed turn). First drop wins: a decayed turn is dropped
+        on every subsequent request, but ``evicted_at_round`` captures the FIRST
+        round it left the context. Turns already recorded are skipped so the
+        metric counts each section once.
+        """
+        states = self.evictable_map.all_turns()
+        if not states:
+            return []
+        cur_round = states[-1].round_idx
+        newly: list[int] = []
+        for ti in turn_indices:
+            if 0 <= ti < len(states):
+                ts = states[ti]
+                if ts.evicted_at_round is None:
+                    ts.evicted_at_round = cur_round
+                    newly.append(cur_round)
+        return newly
+
     def get_opportunity_dict(self) -> dict[str, Any]:
         """Build the D-16 OpportunityResponse JSON shape."""
         n_turns = len(self.evictable_map)
@@ -1061,6 +1086,8 @@ class SessionTracker:
                         list(ts.obs_token_range) if ts.obs_token_range else None
                     ),
                     "superseded_by": ts.superseded_by,
+                    "round_idx": ts.round_idx,
+                    "evicted_at_round": ts.evicted_at_round,
                 }
                 for ts in self.evictable_map
             ],
@@ -1138,6 +1165,14 @@ class SessionTrackerRegistry:
         if s is None:
             return None
         return s.get_opportunity_dict()
+
+    def mark_evicted(self, session_id: str, turn_indices) -> list[int]:
+        """Record which turns server-side eviction dropped this request; returns
+        the rounds newly recorded (for metrics). No-op for unknown sessions."""
+        s = self._sessions.get(session_id)
+        if s is None:
+            return []
+        return s.mark_evicted(turn_indices)
 
     def delete(self, session_id: str) -> None:
         if session_id in self._sessions:

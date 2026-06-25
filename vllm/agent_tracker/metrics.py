@@ -24,7 +24,7 @@ Counters:
 """
 from __future__ import annotations
 
-from prometheus_client import Counter
+from prometheus_client import Counter, Histogram
 
 _AGENT_EVICTION_PREFILL_TOKENS_RAW = Counter(
     "vllm:agent_eviction_prefill_tokens_raw_total",
@@ -43,6 +43,34 @@ _AGENT_EVICTION_FILTER_INVOCATIONS = Counter(
     "Cumulative number of requests where the eviction filter dropped at "
     "least one token.",
 )
+
+_AGENT_EVICTION_TURNS_EVICTED = Counter(
+    "vllm:agent_eviction_turns_evicted_total",
+    "Cumulative number of trajectory turns (tool observations) dropped from "
+    "the prefill by the agent-tracker eviction filter, counted once per turn "
+    "at its first eviction.",
+)
+
+_AGENT_EVICTION_EVICTED_ROUND = Histogram(
+    "vllm:agent_eviction_evicted_round",
+    "Agent round index at which each turn was FIRST dropped from the prefill "
+    "by server-side eviction. Observed once per evicted turn.",
+    buckets=(1, 2, 4, 8, 16, 32, 64, 128, 256, 512, float("inf")),
+)
+
+
+def record_eviction_rounds(rounds: list[int]) -> None:
+    """Record the round at which each newly-evicted turn first left the prefill.
+
+    Args:
+        rounds: one entry per turn that the filter dropped for the FIRST time on
+            this request (the turn's ``round_idx`` value is irrelevant here --
+            this is the round during which the drop actually fired). Empty when
+            the request re-dropped only already-recorded turns.
+    """
+    for r in rounds:
+        _AGENT_EVICTION_EVICTED_ROUND.observe(r)
+        _AGENT_EVICTION_TURNS_EVICTED.inc()
 
 
 def record_filter(raw_tokens: int, filtered_tokens: int) -> None:

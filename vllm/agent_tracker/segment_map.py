@@ -38,6 +38,12 @@ class TurnState:
     # one round; N-decay counts rounds, not raw turns, so a burst of parallel
     # tool turns doesn't exhaust the lookahead window.
     round_idx: int = 0
+    # The ROUND at which this turn's tokens were FIRST dropped from the engine
+    # prefill by server-side eviction (serving.py). None until actually evicted;
+    # first-drop wins (re-dropped every subsequent request, but the round is
+    # recorded once). Surfaced in the opportunity JSON so offline analysis can
+    # see WHEN a section left the context, not just that it was evictable.
+    evicted_at_round: int | None = None
 
 
 class EvictableSegmentMap:

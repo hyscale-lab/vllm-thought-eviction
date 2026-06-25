@@ -40,6 +40,12 @@ class TurnOpportunity(OpenAIBaseModel):
     token_range: tuple[int, int]
     obs_token_range: tuple[int, int] | None = None
     superseded_by: int | None = None
+    # Agent round this turn belongs to (one request ~ one round).
+    round_idx: int = 0
+    # Round at which server-side eviction FIRST dropped this turn from the
+    # prefill; None if it was never actually evicted (e.g. reported as an
+    # opportunity but eviction disabled, or still inside the no-evict zone).
+    evicted_at_round: int | None = None
 
 
 class ExactMatchHit(OpenAIBaseModel):
