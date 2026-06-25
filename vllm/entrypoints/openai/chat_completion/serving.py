@@ -80,6 +80,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from vllm.thought_eviction.orchestrator import EvictionOrchestrator
 from vllm.agent_tracker.metrics import record_filter as _record_eviction_filter
+from vllm.agent_tracker.metrics import record_eviction_rounds as _record_eviction_rounds
 from vllm.agent_tracker.tracker import (
     compute_message_token_ranges,
     get_session_tracker_registry,
@@ -360,8 +361,16 @@ class OpenAIServingChat(OpenAIServing):
                     opp = registry.get_opportunity(request.agent_tracker.session_id)
                     if opp and opp.get("turns"):
                         drop_indices = set()
+                        evicted_turn_idxs: list[int] = []
                         for turn in opp["turns"]:
-                            if turn.get("evictable") and turn.get("reason", "") == "superseded_by_later_read":
+                            # Drop every turn the tracker marked evictable -- not
+                            # just `superseded_by_later_read`. The tracker already
+                            # applied the obs-gate, N-decay tail guard and no-evict
+                            # zone floor, so any `evictable` turn with an
+                            # obs_token_range is safe to drop (this now includes
+                            # `decayed_N_turns` and `superseded_by_edit`, which were
+                            # previously reported as opportunities but never removed).
+                            if turn.get("evictable"):
                                 # The tracker groups assistant (reasoning + tool call) and tool (output)
                                 # messages into a single turn. To preserve the agent's trajectory,
                                 # we ONLY drop the tool output tokens (obs_token_range), leaving the
@@ -370,6 +379,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if obs_range:
                                     start_tok, end_tok = obs_range
                                     drop_indices.update(range(start_tok, end_tok))
+                                    evicted_turn_idxs.append(turn.get("turn_idx"))
                         if drop_indices:
                             # Use prompt_token_ids which is guaranteed to be extracted correctly
                             old_tokens = prompt_token_ids
@@ -382,10 +392,19 @@ class OpenAIServingChat(OpenAIServing):
                             # truncated token sequence, avoiding mismatch.
                             engine_inputs[0].pop("prompt", None)
                             filtered_count = len(drop_indices)
+                            # Record the round at which each turn was FIRST dropped
+                            # (first-drop wins; re-dropped turns return nothing) so
+                            # the opportunity JSON / metrics show WHEN a section left
+                            # the context, not just that it was evictable.
+                            newly_evicted_rounds = registry.mark_evicted(
+                                request.agent_tracker.session_id, evicted_turn_idxs
+                            )
+                            _record_eviction_rounds(newly_evicted_rounds)
                             logger.info(
                                 "agent_tracker: server-side prompt eviction removed %d tokens "
-                                "(original: %d, new: %d)",
-                                filtered_count, len(old_tokens), len(new_tokens)
+                                "across %d turns (%d newly evicted) (original: %d, new: %d)",
+                                filtered_count, len(evicted_turn_idxs),
+                                len(newly_evicted_rounds), len(old_tokens), len(new_tokens)
                             )
                     _record_eviction_filter(raw_token_count, filtered_count)
             except Exception as exc:
