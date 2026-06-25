@@ -81,6 +81,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.thought_eviction.orchestrator import EvictionOrchestrator
 from vllm.agent_tracker.metrics import record_filter as _record_eviction_filter
 from vllm.agent_tracker.metrics import record_eviction_rounds as _record_eviction_rounds
+from vllm.agent_tracker.classifier import MSA_AGENT_TOOL_CALL as _MSA_AGENT_TOOL_CALL
 from vllm.agent_tracker.tracker import (
     compute_message_token_ranges,
     get_session_tracker_registry,
@@ -360,26 +361,61 @@ class OpenAIServingChat(OpenAIServing):
                     filtered_count = 0
                     opp = registry.get_opportunity(request.agent_tracker.session_id)
                     if opp and opp.get("turns"):
+                        turns = opp["turns"]
+                        no_evict_floor = opp.get("no_evict_zone_tokens") or 0
                         drop_indices = set()
                         evicted_turn_idxs: list[int] = []
-                        for turn in opp["turns"]:
-                            # Drop every turn the tracker marked evictable -- not
-                            # just `superseded_by_later_read`. The tracker already
-                            # applied the obs-gate, N-decay tail guard and no-evict
-                            # zone floor, so any `evictable` turn with an
-                            # obs_token_range is safe to drop (this now includes
-                            # `decayed_N_turns` and `superseded_by_edit`, which were
-                            # previously reported as opportunities but never removed).
+                        # Pass 1: drop every turn the tracker marked evictable --
+                        # not just `superseded_by_later_read`. The tracker already
+                        # applied the obs-gate, N-decay tail guard and no-evict zone
+                        # floor, so any `evictable` turn with an obs_token_range is
+                        # safe to drop (now includes `decayed_N_turns` and
+                        # `superseded_by_edit`, previously reported but never removed).
+                        # We drop only the tool OUTPUT tokens here (obs_token_range).
+                        evicted_obs_turns: set[int] = set()
+                        for turn in turns:
                             if turn.get("evictable"):
-                                # The tracker groups assistant (reasoning + tool call) and tool (output)
-                                # messages into a single turn. To preserve the agent's trajectory,
-                                # we ONLY drop the tool output tokens (obs_token_range), leaving the
-                                # assistant's reasoning and tool call intact.
                                 obs_range = turn.get("obs_token_range")
                                 if obs_range:
                                     start_tok, end_tok = obs_range
                                     drop_indices.update(range(start_tok, end_tok))
                                     evicted_turn_idxs.append(turn.get("turn_idx"))
+                                    evicted_obs_turns.add(turn.get("turn_idx"))
+                        # Pass 2: also drop the paired assistant "Agent tool call"
+                        # turn when EVERY tool-result turn in its round is being
+                        # evicted -- otherwise dropping just the results would leave
+                        # the tool_call without a response (a dangling tool call in
+                        # the prefill). An assistant message can carry several
+                        # parallel tool_calls, so we keep it whenever ANY of its
+                        # results survives (else we'd orphan that surviving result).
+                        rounds: dict[int, list[dict]] = {}
+                        for turn in turns:
+                            rounds.setdefault(turn.get("round_idx"), []).append(turn)
+                        for rnd_turns in rounds.values():
+                            tool_call_turns = [
+                                t for t in rnd_turns
+                                if t.get("category") == _MSA_AGENT_TOOL_CALL
+                            ]
+                            result_turns = [
+                                t for t in rnd_turns if t.get("obs_token_range")
+                            ]
+                            if not tool_call_turns or not result_turns:
+                                continue
+                            if not all(
+                                t.get("turn_idx") in evicted_obs_turns
+                                for t in result_turns
+                            ):
+                                continue
+                            for tc in tool_call_turns:
+                                tr = tc.get("token_range")
+                                # Respect the no-evict zone: never drop an assistant
+                                # turn anchored below the floor (its early results may
+                                # have been above the floor and thus evicted).
+                                if not tr or tr[0] < no_evict_floor:
+                                    continue
+                                start_tok, end_tok = tr
+                                drop_indices.update(range(start_tok, end_tok))
+                                evicted_turn_idxs.append(tc.get("turn_idx"))
                         if drop_indices:
                             # Use prompt_token_ids which is guaranteed to be extracted correctly
                             old_tokens = prompt_token_ids
