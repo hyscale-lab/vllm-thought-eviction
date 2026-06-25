@@ -26,8 +26,11 @@ class AgentTrackerParams(OpenAIBaseModel):
             "engine's prompt_token_ids before generation."
         ),
     )
-    # D-09: reserved for future configurability; not exposed in v1.
-    # n_decay: int | None = Field(default=None, ge=1, le=20)
+    # D-09: per-session N-decay tail-guard window (rounds). When set, overrides
+    # the SessionTracker default (3). Higher = more conservative (spares more
+    # recent rounds before decay-evicting). Swept per-arm via the client's
+    # AGENT_TRACKER_N_DECAY knob; None keeps the server default.
+    n_decay: int | None = Field(default=None, ge=1, le=20)
 
 
 class TurnOpportunity(OpenAIBaseModel):

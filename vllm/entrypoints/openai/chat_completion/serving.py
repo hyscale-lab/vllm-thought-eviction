@@ -350,6 +350,7 @@ class OpenAIServingChat(OpenAIServing):
                     msg_token_ranges = _compute_ranges(0)
                 registry.observe_request(
                     session_id=sid,
+                    n_decay=getattr(request.agent_tracker, "n_decay", None),
                     structured_messages=materialized_messages,
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,

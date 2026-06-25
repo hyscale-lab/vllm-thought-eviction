@@ -1132,11 +1132,21 @@ class SessionTrackerRegistry:
         s = self._sessions.get(session_id)
         return s.prev_msg_count if s is not None else 0
 
-    def observe_request(self, *, session_id: str, **kwargs) -> dict:
+    def observe_request(
+        self, *, session_id: str, n_decay: int | None = None, **kwargs
+    ) -> dict:
         self._gc()
         if session_id not in self._sessions:
-            self._sessions[session_id] = SessionTracker(session_id)
-            logger.info("agent_tracker: new session %s", session_id)
+            # n_decay (if provided by the client) is a per-session knob, locked
+            # at tracker creation; later requests reuse the existing tracker.
+            if n_decay is not None:
+                self._sessions[session_id] = SessionTracker(session_id, n_decay=n_decay)
+            else:
+                self._sessions[session_id] = SessionTracker(session_id)
+            logger.info(
+                "agent_tracker: new session %s (n_decay=%d)",
+                session_id, self._sessions[session_id].n_decay,
+            )
         self._sessions.move_to_end(session_id)
         return self._sessions[session_id].observe_request(**kwargs)
 
