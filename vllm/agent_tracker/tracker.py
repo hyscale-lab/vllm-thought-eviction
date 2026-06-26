@@ -513,6 +513,12 @@ class SessionTracker:
         # every TurnState created for that action shares the round. N-decay
         # counts these rounds rather than raw turn indices.
         self._round_counter = 0
+        # Per-request authoritative server-side prefill log (one entry per engine
+        # request): the prefill BEFORE eviction (raw) and what the engine actually
+        # computes AFTER the transparent drop (post). Serialized into the
+        # opportunity dict so the analysis can build an exact per-request
+        # prefill CDF instead of reconstructing it from evicted_at_round.
+        self._prefill_requests: list[dict] = []
 
     # ----- Robustness: reused/reset session_id detection ----------------
     def is_diverged(self, structured_messages: list) -> bool:
@@ -1123,6 +1129,21 @@ class SessionTracker:
                     newly.append(cur_round)
         return newly
 
+    def record_prefill(self, raw_token_count: int, filtered_count: int) -> None:
+        """Log the raw and post-eviction prefill token counts for the CURRENT
+        request. Called by the serving eviction hook after it computes the drop
+        (filtered_count == 0 when nothing was dropped), so the opportunity JSON
+        carries an exact per-request prefill trace for the analysis CDF."""
+        states = self.evictable_map.all_turns()
+        cur_round = states[-1].round_idx if states else 0
+        self._prefill_requests.append({
+            "request_idx": self.request_idx,
+            "round_idx": cur_round,
+            "raw_prefill_tokens": int(raw_token_count),
+            "filtered_tokens": int(filtered_count),
+            "post_evict_prefill_tokens": int(raw_token_count) - int(filtered_count),
+        })
+
     def get_opportunity_dict(self) -> dict[str, Any]:
         """Build the D-16 OpportunityResponse JSON shape."""
         n_turns = len(self.evictable_map)
@@ -1166,6 +1187,9 @@ class SessionTracker:
                 for ts in self.evictable_map
             ],
             "file_timeline": self.file_timeline.to_dict(),
+            # Authoritative per-request server-side prefill trace (option C);
+            # empty when no request has been recorded yet.
+            "prefill_requests": list(self._prefill_requests),
         }
 
 
@@ -1249,6 +1273,14 @@ class SessionTrackerRegistry:
         if s is None:
             return []
         return s.mark_evicted(turn_indices)
+
+    def record_prefill(self, session_id: str, raw_token_count: int,
+                       filtered_count: int) -> None:
+        """Log this request's raw/post-eviction prefill on the session tracker.
+        No-op for unknown sessions."""
+        s = self._sessions.get(session_id)
+        if s is not None:
+            s.record_prefill(raw_token_count, filtered_count)
 
     def delete(self, session_id: str) -> None:
         if session_id in self._sessions:

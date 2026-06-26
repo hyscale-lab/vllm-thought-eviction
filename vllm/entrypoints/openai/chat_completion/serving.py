@@ -452,6 +452,13 @@ class OpenAIServingChat(OpenAIServing):
                                 len(newly_evicted_rounds), len(old_tokens), len(new_tokens)
                             )
                     _record_eviction_filter(raw_token_count, filtered_count)
+                    # Authoritative per-request prefill trace for the analysis CDF
+                    # (option C): raw vs post-eviction tokens this request actually
+                    # computed. Serialized into agent_tracker.json's prefill_requests.
+                    registry.record_prefill(
+                        request.agent_tracker.session_id,
+                        raw_token_count, filtered_count,
+                    )
             except Exception as exc:
                 logger.warning(
                     "agent_tracker hook failed for session %s: %s",
