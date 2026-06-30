@@ -399,41 +399,50 @@ def compute_message_token_ranges(
     # paying the probe cost for sessions that always have a user in messages[0].
     placeholder_overhead: int | None = None
 
+    def _rendered_len(render_msgs, *, agp, cfm, tools_arg):
+        """Token length of a rendered prefix, the SAME way the vLLM engine
+        builds prompt_token_ids: render to a string (tokenize=False) and then
+        encode with add_special_tokens=False (the chat template emits BOS
+        itself; see ChatCompletionRequest.add_special_tokens default False).
+
+        We deliberately do NOT use apply_chat_template(tokenize=True): its
+        fast path is broken for some custom chat templates whose markers are
+        not in the tokenizer's added-tokens. The Gemma4 template
+        (<|turn>/<|tool_call>/<|tool_response>/<|"|> ...) is the motivating
+        case -- tokenize=True collapses the WHOLE render to ~2 tokens (they
+        round-trip on decode but encode to far more), which zeroed every
+        per-message range and made evictable_token_total=0. Render-then-encode
+        matches the engine for Gemma AND is identical to the old tokenize=True
+        length for well-behaved templates (Qwen), so the framing assertion
+        ranges[-1][1] == len(prompt_token_ids) keeps holding for both.
+        """
+        text = tokenizer.apply_chat_template(
+            render_msgs,
+            chat_template=effective_chat_template,
+            tools=tools_arg,
+            tokenize=False,
+            add_generation_prompt=agp,
+            continue_final_message=cfm,
+            **kwargs,
+        )
+        return len(tokenizer.encode(text, add_special_tokens=False))
+
     def _render_prefix(prefix, *, is_final):
         nonlocal placeholder_overhead
         agp = add_generation_prompt if is_final else False
         cfm = continue_final_message if is_final else False
         if _prefix_has_user(prefix):
-            rendered = tokenizer.apply_chat_template(
-                prefix,
-                chat_template=effective_chat_template,
-                tools=tools,
-                tokenize=True,
-                add_generation_prompt=agp,
-                continue_final_message=cfm,
-                **kwargs,
-            )
-            return len(rendered)
+            return _rendered_len(prefix, agp=agp, cfm=cfm, tools_arg=tools)
         if placeholder_overhead is None:
-            placeholder_overhead = len(tokenizer.apply_chat_template(
+            placeholder_overhead = _rendered_len(
                 [dict(_PLACEHOLDER_USER_MSG)],
-                chat_template=effective_chat_template,
-                tools=None,
-                tokenize=True,
-                add_generation_prompt=False,
-                **kwargs,
-            ))
+                agp=False, cfm=False, tools_arg=None,
+            )
         normalized = _inject_placeholder_after_leading_system(prefix)
-        rendered = tokenizer.apply_chat_template(
-            normalized,
-            chat_template=effective_chat_template,
-            tools=tools,
-            tokenize=True,
-            add_generation_prompt=agp,
-            continue_final_message=cfm,
-            **kwargs,
+        rendered_len = _rendered_len(
+            normalized, agp=agp, cfm=cfm, tools_arg=tools,
         )
-        return max(0, len(rendered) - placeholder_overhead)
+        return max(0, rendered_len - placeholder_overhead)
 
     # -- Fast path: skip prefixes [1..start_from] via a single boundary call --
     if start_from > 0:
