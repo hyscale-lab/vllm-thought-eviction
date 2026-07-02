@@ -376,9 +376,29 @@ class OpenAIServingChat(OpenAIServing):
                         # safe to drop (now includes `decayed_N_turns` and
                         # `superseded_by_edit`, previously reported but never removed).
                         # We drop only the tool OUTPUT tokens here (obs_token_range).
+                        # Epoch gate (ABLATION, evict_epoch=K>1): commit NEW
+                        # evictions only when this request's round sits on an
+                        # epoch boundary; turns with evicted_at_round already
+                        # stamped stay dropped (monotone drop set). Between
+                        # boundaries the drop set is static, so consecutive
+                        # requests differ only by appended tokens and the
+                        # prefix cache stays valid -- invalidation frequency
+                        # falls from ~every request to ~1/K.
+                        evict_epoch = getattr(
+                            request.agent_tracker, "evict_epoch", None
+                        ) or 0
+                        epoch_open = True
+                        if evict_epoch > 1:
+                            cur_round = max(
+                                (t.get("round_idx") or 0) for t in turns
+                            )
+                            epoch_open = cur_round % evict_epoch == 0
                         evicted_obs_turns: set[int] = set()
                         for turn in turns:
-                            if turn.get("evictable"):
+                            if turn.get("evictable") and (
+                                epoch_open
+                                or turn.get("evicted_at_round") is not None
+                            ):
                                 obs_range = turn.get("obs_token_range")
                                 if obs_range:
                                     start_tok, end_tok = obs_range
