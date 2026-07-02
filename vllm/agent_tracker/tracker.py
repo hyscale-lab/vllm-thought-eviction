@@ -15,6 +15,7 @@ identifier here would defeat the literal-grep gate that guards D-10.
 """
 from __future__ import annotations
 
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Iterable
@@ -288,7 +289,38 @@ def _framing_signature(messages: list) -> tuple:
     return tuple(parts)
 
 
+# HF fast (Rust) tokenizers are not thread-safe: concurrent encode/apply_chat_
+# template borrows raise "Already borrowed" (observed as HTTP 500 on 13/24 and
+# 7/24 simultaneous tracker requests in the 2026-07-02 loadtests -- the failures
+# recur whenever many sessions' rounds align, not just at cold start). The
+# engine tokenizes on its own path; this lock only serializes the TRACKER's
+# re-render, whose cost is small next to prefill.
+_TRACKER_TOKENIZE_LOCK = threading.Lock()
+
+
 def compute_message_token_ranges(
+    messages: list,
+    tokenizer,
+    request,
+    chat_template: str | None,
+    chat_template_content_format: str,
+    default_chat_template_kwargs: dict,
+    tools: list[dict] | None = None,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
+    start_from: int = 0,
+) -> list[tuple[int, int]]:
+    with _TRACKER_TOKENIZE_LOCK:
+        return _compute_message_token_ranges_unlocked(
+            messages, tokenizer, request, chat_template,
+            chat_template_content_format, default_chat_template_kwargs,
+            tools=tools, add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            start_from=start_from,
+        )
+
+
+def _compute_message_token_ranges_unlocked(
     messages: list,
     tokenizer,
     request,
