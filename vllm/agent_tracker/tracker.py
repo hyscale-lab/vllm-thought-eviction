@@ -1138,20 +1138,22 @@ class SessionTracker:
                     newly.append(cur_round)
         return newly
 
-    def record_prefill(self, raw_token_count: int, filtered_count: int) -> None:
+    def record_prefill(self, raw_token_count: int, filtered_count: int) -> dict:
         """Log the raw and post-eviction prefill token counts for the CURRENT
         request. Called by the serving eviction hook after it computes the drop
         (filtered_count == 0 when nothing was dropped), so the opportunity JSON
         carries an exact per-request prefill trace for the analysis CDF."""
         states = self.evictable_map.all_turns()
         cur_round = states[-1].round_idx if states else 0
-        self._prefill_requests.append({
+        rec = {
             "request_idx": self.request_idx,
             "round_idx": cur_round,
             "raw_prefill_tokens": int(raw_token_count),
             "filtered_tokens": int(filtered_count),
             "post_evict_prefill_tokens": int(raw_token_count) - int(filtered_count),
-        })
+        }
+        self._prefill_requests.append(rec)
+        return rec
 
     def get_opportunity_dict(self) -> dict[str, Any]:
         """Build the D-16 OpportunityResponse JSON shape."""
@@ -1220,6 +1222,17 @@ class SessionTrackerRegistry:
         self._sessions: OrderedDict[str, SessionTracker] = OrderedDict()
         self.idle_timeout = idle_timeout_seconds
         self.max_sessions = max_sessions
+        # Per-session prefill trace that SURVIVES tracker resets. The
+        # tracker-local SessionTracker._prefill_requests is wiped on every
+        # reset() -- and some harnesses (e.g. OpenClaw) reset on nearly every
+        # request because their per-request messages are not a clean token-level
+        # append, so only the last request's entry would survive there. Keyed on
+        # session_id here, the trace accumulates across resets for the SAME
+        # conversation; a leading-framing change (a genuinely different
+        # conversation reusing a session_id) starts a fresh trace. Bounded by the
+        # same delete()/_gc() lifecycle as _sessions.
+        self._prefill_log: dict[str, list[dict]] = {}
+        self._prefill_framing: dict[str, tuple] = {}
 
     def get_prev_msg_count(self, session_id: str) -> int:
         """Return the session's prev_msg_count (0 if session doesn't exist yet)."""
@@ -1262,6 +1275,9 @@ class SessionTrackerRegistry:
         """Drop any tracker for ``session_id`` so the next observe_request
         rebuilds it fresh. Used by the hook when a session_id is reused for a
         new/compacted conversation."""
+        # NB: intentionally does NOT touch _prefill_log/_prefill_framing -- the
+        # per-request prefill trace must accumulate ACROSS resets for the same
+        # conversation (that is the whole point of keying it on the registry).
         if session_id in self._sessions:
             del self._sessions[session_id]
             logger.info(
@@ -1273,7 +1289,12 @@ class SessionTrackerRegistry:
         s = self._sessions.get(session_id)
         if s is None:
             return None
-        return s.get_opportunity_dict()
+        d = s.get_opportunity_dict()
+        # Prefer the reset-surviving session-keyed trace over the tracker-local
+        # _prefill_requests (which, after a reset, holds only this request).
+        if session_id in self._prefill_log:
+            d["prefill_requests"] = list(self._prefill_log[session_id])
+        return d
 
     def mark_evicted(self, session_id: str, turn_indices) -> list[int]:
         """Record which turns server-side eviction dropped this request; returns
@@ -1285,16 +1306,30 @@ class SessionTrackerRegistry:
 
     def record_prefill(self, session_id: str, raw_token_count: int,
                        filtered_count: int) -> None:
-        """Log this request's raw/post-eviction prefill on the session tracker.
-        No-op for unknown sessions."""
+        """Append this request's raw/post-eviction prefill to the SESSION-keyed
+        trace (``_prefill_log``) that survives tracker resets. No-op for unknown
+        sessions. A change in the leading system + first-user framing (a
+        genuinely different conversation reusing the session_id) starts a fresh
+        trace; otherwise records accumulate across the per-request resets of the
+        same conversation, with request_idx renumbered monotonically."""
         s = self._sessions.get(session_id)
-        if s is not None:
-            s.record_prefill(raw_token_count, filtered_count)
+        if s is None:
+            return
+        framing = _framing_signature(s._all_messages)
+        if self._prefill_framing.get(session_id) != framing:
+            self._prefill_log[session_id] = []
+            self._prefill_framing[session_id] = framing
+        log = self._prefill_log[session_id]
+        rec = s.record_prefill(raw_token_count, filtered_count)
+        rec["request_idx"] = len(log) + 1  # monotonic across resets
+        log.append(rec)
 
     def delete(self, session_id: str) -> None:
         if session_id in self._sessions:
             del self._sessions[session_id]
             logger.info("agent_tracker: deleted session %s", session_id)
+        self._prefill_log.pop(session_id, None)
+        self._prefill_framing.pop(session_id, None)
 
     def __contains__(self, session_id: str) -> bool:
         return session_id in self._sessions
@@ -1308,9 +1343,13 @@ class SessionTrackerRegistry:
             if now - self._sessions[sid].last_active > self.idle_timeout:
                 logger.info("agent_tracker: idle-evict session %s", sid)
                 del self._sessions[sid]
+                self._prefill_log.pop(sid, None)
+                self._prefill_framing.pop(sid, None)
         while len(self._sessions) >= self.max_sessions:
             oldest_sid, _ = self._sessions.popitem(last=False)
             logger.info("agent_tracker: lru-evict session %s", oldest_sid)
+            self._prefill_log.pop(oldest_sid, None)
+            self._prefill_framing.pop(oldest_sid, None)
 
 
 _REGISTRY: SessionTrackerRegistry | None = None
