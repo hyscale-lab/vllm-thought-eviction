@@ -17,6 +17,11 @@ class TurnState:
     category: str
     files_referenced: set[str] = field(default_factory=set)
     files_referenced_full: set[str] = field(default_factory=set)
+    # Normalized URLs this turn references: search-result links for a
+    # TOOL_WEB_SEARCH turn, the fetch target for a TOOL_WEB_FETCH turn. Empty
+    # for every other category. Drives web supersession (see
+    # SessionTracker._reclassify_priors_for_new_web_turn).
+    urls_referenced: set[str] = field(default_factory=set)
     command: str | None = None
     is_edit: bool = False
     is_success: bool = True

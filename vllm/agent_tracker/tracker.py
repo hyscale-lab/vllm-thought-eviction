@@ -32,6 +32,8 @@ from vllm.agent_tracker.classifier import (
     TOOL_BUILD_INSTALL,
     TOOL_RUN_EXEC,
     TOOL_OTHER,
+    TOOL_WEB_SEARCH,
+    TOOL_WEB_FETCH,
     SYSTEM_PROMPT,
     USER_TASK,
     OBSERVATION_CATEGORIES,
@@ -39,6 +41,7 @@ from vllm.agent_tracker.classifier import (
     _MIN_DEDUPE_CHARS,
     _classify_new_messages,
     _extract_files_from_messages,
+    _extract_urls_from_messages,
     _files_overlap,
     normalize_observation_text,
 )
@@ -49,6 +52,7 @@ from vllm.agent_tracker.token_index import (
     hash_text,
     hash_token_sequence,
 )
+from vllm.agent_tracker.url_timeline import UrlTimeline
 
 logger = init_logger(__name__)
 
@@ -469,10 +473,11 @@ def compute_message_token_ranges(
 class SessionTracker:
     """Per-session live trajectory tracker (D-07).
 
-    State (three indexed views over the same TurnState list):
+    State (indexed views over the same TurnState list):
       - file_timeline:    FileTimeline (D-07 view 1)
       - evictable_map:    EvictableSegmentMap (D-07 view 2; primary opportunity surface)
       - token_index:      TokenSequenceIndex (D-07 view 3; exact-match observation reuse)
+      - url_timeline:     UrlTimeline (D-20; compact searched/fetched URL record)
 
     D-10 dynamic no-evict zone:
       - self.no_evict_zone_tokens: int | None
@@ -500,6 +505,7 @@ class SessionTracker:
         self.prev_msg_count = 0
         self.request_idx = 0
         self.file_timeline = FileTimeline()
+        self.url_timeline = UrlTimeline()
         self.evictable_map = EvictableSegmentMap()
         self.token_index = TokenSequenceIndex()
         # Content-hash dedupe of repeated command output (findings §5): maps the
@@ -770,6 +776,7 @@ class SessionTracker:
                 category, command = _classify_new_messages(one, prefix)
                 files_full = _extract_files_from_messages(one, prefix)
                 files_basenames = {f.split("/")[-1] for f in files_full}
+                urls_referenced = _extract_urls_from_messages(one, prefix, category)
 
                 token_range = (seg_start, seg_end)
                 token_count = seg_end - seg_start
@@ -820,6 +827,7 @@ class SessionTracker:
                     category=category,
                     files_referenced=files_basenames,
                     files_referenced_full=files_full,
+                    urls_referenced=urls_referenced,
                     command=command or None,
                     is_edit=(category == TOOL_FILE_EDIT),
                     is_success=True,
@@ -855,9 +863,23 @@ class SessionTracker:
                         msg_idx=j, full_path=fp,
                     )
 
+                # Update UrlTimeline (D-20): compact "already searched/fetched"
+                # record, kept even after the search turn itself is evicted.
+                if category in (TOOL_WEB_SEARCH, TOOL_WEB_FETCH):
+                    url_action = "search" if category == TOOL_WEB_SEARCH else "fetch"
+                    for u in urls_referenced:
+                        self.url_timeline.append(
+                            url=u, turn_idx=turn_idx, action=url_action, msg_idx=j,
+                        )
+
                 # D-08 supersession back-walk: an earlier observation can be
                 # superseded by a later read even within this same request.
                 self._reclassify_priors_for_new_turn(turn_idx)
+
+                # D-20 web supersession: a web_search's raw result snippet is
+                # redundant once a later web_fetch consumes one of its URLs, or
+                # once a later web_search fires a new query (see method docstring).
+                self._reclassify_priors_for_new_web_turn(turn_idx)
 
                 # Content-hash dedupe of repeated command output (no-op unless
                 # this session enabled dedupe_cmd_output).
@@ -977,6 +999,47 @@ class SessionTracker:
                     prior.evictable = True
                     prior.eviction_reason = "superseded_by_later_read"
                     prior.superseded_by = new_turn_idx
+
+    def _reclassify_priors_for_new_web_turn(self, new_turn_idx: int) -> None:
+        """D-20: web_search/web_fetch supersession -- "read the menu, ordered,
+        now the menu can go."
+
+        Based on the observed task-trace pattern: a search surfaces many URLs
+        but only a small fraction ever get fetched, and every fetch draws from
+        an earlier search. Once the agent has picked which links to follow (or
+        moved on to a new query), the raw search-result snippet is redundant:
+
+        (1) FETCH consumes a search's URL: once a web_fetch targets a URL a
+            prior web_search surfaced, that search's snippet is superseded --
+            the fetched page content replaces it.
+        (2) A new SEARCH means the agent moved on: once another web_search
+            fires, every earlier not-yet-superseded web_search is stale,
+            REGARDLESS of URL overlap between the two queries -- a rephrased
+            query is still "moving past" the old results.
+
+        Mirrors `_reclassify_priors_for_new_turn`'s corrections: only
+        OBSERVATION turns are eligible (obs_token_range is not None), and the
+        FIRST supersedor wins (provisional `decayed_N_turns` marks may still be
+        upgraded, matching offline forward-scan semantics).
+        """
+        new_ts = self.evictable_map[new_turn_idx]
+        if new_ts.category not in (TOOL_WEB_SEARCH, TOOL_WEB_FETCH):
+            return
+        for prior_idx in range(new_turn_idx):
+            prior = self.evictable_map[prior_idx]
+            if prior.obs_token_range is None or prior.category != TOOL_WEB_SEARCH:
+                continue
+            if prior.evictable and prior.eviction_reason != "decayed_N_turns":
+                continue
+            if new_ts.category == TOOL_WEB_FETCH:
+                if new_ts.urls_referenced & prior.urls_referenced:
+                    prior.evictable = True
+                    prior.eviction_reason = "superseded_by_fetch"
+                    prior.superseded_by = new_turn_idx
+            else:  # new_ts.category == TOOL_WEB_SEARCH
+                prior.evictable = True
+                prior.eviction_reason = "superseded_by_new_search"
+                prior.superseded_by = new_turn_idx
 
     def _dedupe_repeated_output(self, new_turn_idx: int) -> None:
         """Content-hash dedupe of repeated command output (findings doc §5).
@@ -1196,6 +1259,7 @@ class SessionTracker:
                 for ts in self.evictable_map
             ],
             "file_timeline": self.file_timeline.to_dict(),
+            "url_timeline": self.url_timeline.to_dict(),
             # Authoritative per-request server-side prefill trace (option C);
             # empty when no request has been recorded yet.
             "prefill_requests": list(self._prefill_requests),

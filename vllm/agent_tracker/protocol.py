@@ -51,7 +51,7 @@ class TurnOpportunity(OpenAIBaseModel):
     turn_idx: int
     category: str
     evictable: bool
-    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_repeat | decayed_N_turns
+    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_repeat | superseded_by_fetch | superseded_by_new_search | decayed_N_turns
     msg_range: tuple[int, int]
     token_range: tuple[int, int]
     obs_token_range: tuple[int, int] | None = None

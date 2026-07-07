@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from vllm.logger import init_logger
 
@@ -48,6 +49,8 @@ TOOL_FILE_SEARCH = "Tool output: file search"
 TOOL_TEST_RUN = "Tool output: test run"
 TOOL_BUILD_INSTALL = "Tool output: build/install"
 TOOL_RUN_EXEC = "Tool output: run/exec"
+TOOL_WEB_SEARCH = "Tool output: web search"
+TOOL_WEB_FETCH = "Tool output: web fetch"
 TOOL_OTHER = "Tool output: other bash"
 
 
@@ -72,6 +75,33 @@ _FILE_PATH_RE = re.compile(
 
 # Tool names that carry bash/shell commands.
 _BASH_TOOL_RE = re.compile(r'bash|execute|run', re.IGNORECASE)
+
+# URL extraction for web_search/web_fetch eviction (D-20): pulls http(s) links
+# out of a web_search tool's result content or a web_fetch call's arguments.
+# Trailing punctuation that a sentence/markdown wrapper tacks on (`.`, `)`,
+# `"`, closing markdown `]`) is stripped by `_normalize_url` below, not here,
+# so the regex itself stays a plain "greedy till whitespace/bracket" match.
+_URL_RE = re.compile(r'https?://[^\s<>\)\]"\']+')
+
+
+def _normalize_url(url: str) -> str:
+    """Normalize a URL for overlap comparisons across search results and
+    fetch targets: strips trailing sentence/markdown punctuation and the
+    fragment, lowercases scheme+host, and drops a trailing slash on the path.
+
+    Two URLs that normalize to the same string are treated as "the same
+    page" for eviction purposes (e.g. a web_fetch of `HTTP://Example.com/x/`
+    consumes the search result `https://example.com/x`).
+    """
+    stripped = (url or "").strip().rstrip('.,;:!?)"\']')
+    if not stripped:
+        return ""
+    try:
+        parts = urlsplit(stripped)
+    except ValueError:
+        return stripped
+    path = parts.path.rstrip('/')
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), path, parts.query, ""))
 
 
 def extract_turn_signals(rows):
@@ -228,6 +258,43 @@ def build_tool_call_fn_name_map(messages: list) -> dict:
     return mapping
 
 
+def build_tool_call_url_map(messages: list) -> dict:
+    """Map tool_call_id -> the URL a web_fetch-like call targeted.
+
+    Looks for a `url`/`URL`/`uri`/`link` key in the JSON-decoded arguments
+    first; falls back to regex-extracting the first http(s) URL from the raw
+    arguments string for tools that nest the URL differently.
+    """
+    mapping: dict = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in (msg.get("tool_calls") or []):
+            tc_id = tc.get("id") or tc.get("tool_call_id")
+            if not tc_id:
+                continue
+            fn = tc.get("function") or {}
+            args_raw = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except (json.JSONDecodeError, TypeError, ValueError):
+                args = {}
+            url = None
+            if isinstance(args, dict):
+                for key in ("url", "URL", "uri", "link"):
+                    if args.get(key):
+                        url = str(args[key])
+                        break
+            if url is None:
+                args_str = args_raw if isinstance(args_raw, str) else json.dumps(args_raw)
+                m = _URL_RE.search(args_str)
+                if m:
+                    url = m.group(0)
+            if url:
+                mapping[tc_id] = url
+    return mapping
+
+
 # Structured-tool function-name -> intent. Checked in EDIT, SEARCH, READ order so
 # e.g. "rewrite"/"str_replace" (contain "write"/"replace") classify as edit, not
 # read, and "file_search" classifies as search. Names vary across agents, so both
@@ -256,6 +323,10 @@ def classify_structured_tool(fn_name: str) -> str:
     n = (fn_name or "").strip().lower()
     if not n:
         return ""
+    if any(k in n for k in _STRUCT_WEB_SEARCH_KEYS):
+        return TOOL_WEB_SEARCH
+    if any(k in n for k in _STRUCT_WEB_FETCH_KEYS):
+        return TOOL_WEB_FETCH
     if any(k in n for k in _STRUCT_EDIT_KEYS):
         return TOOL_FILE_EDIT
     if any(k in n for k in _STRUCT_SEARCH_KEYS):
@@ -273,7 +344,10 @@ _FILE_SEARCH_HEADS = {"find", "grep", "rg", "ag", "ack", "ls", "which",
 _RUN_EXEC_HEADS = {"node", "ruby", "perl", "lua", "java", "deno", "bun"}
 _TEST_HEADS = {"pytest", "py.test", "tox", "nosetests", "jest", "mocha"}
 _BUILD_HEADS = {"cmake", "ninja", "bazel", "buck", "mvn", "gradle"}
-
+_STRUCT_WEB_SEARCH_KEYS = ("web_search", "websearch", "search_web", "google_search",
+                           "brave_search", "bing_search", "internet_search")
+_STRUCT_WEB_FETCH_KEYS = ("web_fetch", "webfetch", "fetch_url", "fetch_page",
+                          "url_fetch", "browse", "visit_url", "read_url", "get_url")
 
 def _strip_envs(tokens: list) -> list:
     """Drop leading VAR=value tokens (env-var prefixes) before head detection."""
@@ -458,6 +532,7 @@ def extract_new_messages(entries: list[dict]) -> list[list[dict]]:
 # Observation categories (tool outputs)
 OBSERVATION_CATEGORIES = {
     TOOL_FILE_READ, TOOL_FILE_EDIT, TOOL_FILE_SEARCH,
+    TOOL_WEB_FETCH, TOOL_WEB_SEARCH,
     TOOL_TEST_RUN, TOOL_BUILD_INSTALL, TOOL_RUN_EXEC,
     TOOL_OTHER,
 }
@@ -621,6 +696,50 @@ def _extract_files_from_messages(new_msgs: list[dict], all_msgs: list[dict]) -> 
                         files.add(match)
 
     return files
+
+
+def _extract_urls_from_messages(
+    new_msgs: list[dict], all_msgs: list[dict], category: str,
+) -> set[str]:
+    """Extract normalized URLs referenced by a single web_search/web_fetch turn.
+
+    The meaning of "referenced" depends on `category` -- mirrors how
+    `files_referenced` doubles for both reads and edits, disambiguated by
+    `is_edit` elsewhere:
+
+    - TOOL_WEB_SEARCH: URLs found in the tool OUTPUT content (the candidate
+      links the query surfaced -- what a later web_fetch might "consume").
+    - TOOL_WEB_FETCH: the URL argument the call targeted (falls back to
+      scanning the tool output content if no `url`-like argument was found).
+    - anything else: empty set (this turn carries no web signal).
+    """
+    if category not in (TOOL_WEB_SEARCH, TOOL_WEB_FETCH):
+        return set()
+
+    urls: set[str] = set()
+    all_together = all_msgs + new_msgs
+    for msg in new_msgs:
+        if msg.get("role") not in ("tool", "function"):
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(
+                item.get("text", "") if isinstance(item, dict) else str(item)
+                for item in content
+            )
+        if category == TOOL_WEB_SEARCH:
+            for raw in _URL_RE.findall(content or ""):
+                urls.add(_normalize_url(raw))
+        else:  # TOOL_WEB_FETCH
+            tc_id = msg.get("tool_call_id", "")
+            target = build_tool_call_url_map(all_together).get(tc_id)
+            if target:
+                urls.add(_normalize_url(target))
+            else:
+                for raw in _URL_RE.findall(content or ""):
+                    urls.add(_normalize_url(raw))
+                    break
+    return urls
 
 
 def _files_overlap(files_a: set[str], files_b: set[str],
