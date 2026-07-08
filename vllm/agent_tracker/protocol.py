@@ -44,6 +44,17 @@ class AgentTrackerParams(OpenAIBaseModel):
     # matches an earlier such turn supersedes it (reason superseded_by_repeat).
     # Per-session, locked at tracker creation like n_decay.
     dedupe_cmd_output: bool = Field(default=False)
+    # Ablation: epoch-batched (cache-friendly) eviction. When set to K>1, NEW
+    # evictions are committed to the engine prompt only on requests whose round
+    # sits on an epoch boundary (round % K == 0); turns already dropped stay
+    # dropped (monotone). Hard eviction invalidates the prefix cache at the
+    # earliest newly-dropped span every time the drop set changes -- measured at
+    # 50-62% of requests on the n5/n10 arms, inflating actual prefill compute
+    # 1.3-4.3x over noevict. Batching the drop-set changes cuts that
+    # invalidation frequency to ~1/K with the same steady-state token savings.
+    # Per-request gate applied in serving.py Pass 1; None/1 = evict every
+    # request (legacy behavior).
+    evict_epoch: int | None = Field(default=None, ge=1, le=9999)
 
 
 class TurnOpportunity(OpenAIBaseModel):
