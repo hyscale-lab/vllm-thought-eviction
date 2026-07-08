@@ -114,6 +114,32 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         making it impossible to separate pre-reasoning content from
         reasoning content via string matching.
         """
+        # Prompt-opened channel (tool-loop continuation). The chat template
+        # appends ``<|channel>thought\n`` as the generation prompt after a
+        # tool response, so the channel-start token lives in the PROMPT and is
+        # never generated. The base parser keys on the start token appearing in
+        # the *generated* stream, so without this branch it misroutes the whole
+        # thought body to content (and the tool call downstream never parses).
+        # Detect "no start token generated, channel not yet closed" and route
+        # the body to reasoning until the channel-end token arrives.
+        start_generated = (
+            self.start_token_id in previous_token_ids
+            or self.start_token_id in delta_token_ids
+        )
+        end_generated_prev = self.end_token_id in previous_token_ids
+        if not start_generated and not end_generated_prev:
+            if self.end_token_id in delta_token_ids:
+                end_idx = delta_text.find(self.end_token)
+                reasoning = delta_text[:end_idx]
+                content = delta_text[end_idx + len(self.end_token) :]
+                return DeltaMessage(
+                    reasoning=reasoning or None,
+                    content=content or None,
+                )
+            if delta_text:
+                return DeltaMessage(reasoning=delta_text)
+            return None
+
         result = super().extract_reasoning_streaming(
             previous_text,
             current_text,
