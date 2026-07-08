@@ -196,6 +196,8 @@ cython_debug/
 
 # Docker build state (tracks last full build for tools/pre_commit/docker_push.sh)
 .docker_build_state
+.docker_push.lock
+.docker_push.log
 
 # Cursor
 .cursor/

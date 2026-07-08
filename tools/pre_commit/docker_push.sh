@@ -2,6 +2,9 @@
 # Build the vllm-openai image and push it to Docker Hub.
 # This is a pre-commit hook, but it runs only at the `manual` stage —
 # invoke explicitly with: pre-commit run docker-push --hook-stage manual
+# The actual build+push detaches into the background so your terminal isn't
+# blocked for the ~30-90min a full build can take — check .docker_push.log
+# for progress/results.
 
 set -euo pipefail
 
@@ -22,45 +25,63 @@ if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
   exit 1
 fi
 
-IMAGE="$DOCKERHUB_USERNAME/vllm-eviction"
-TAG="$(git rev-parse --short HEAD)"
-STATE_FILE=".docker_build_state"
-AGENT_TRACKER_PATHS='^vllm/agent_tracker/|^vllm/entrypoints/openai/agent_tracker/'
+LOCK_FILE=".docker_push.lock"
+LOG_FILE=".docker_push.log"
 
-echo "Logging in to Docker Hub as $DOCKERHUB_USERNAME..."
-docker login --username "$DOCKERHUB_USERNAME" --password-stdin <<< "$DOCKERHUB_TOKEN"
+if [ -f "$LOCK_FILE" ] && kill -0 "$(cat "$LOCK_FILE")" 2> /dev/null; then
+  echo "A docker-push build is already running (PID $(cat "$LOCK_FILE")); skipping this one. See $LOG_FILE."
+  exit 0
+fi
 
-# Use the fast agent_tracker overlay (docker/Dockerfile.agent_tracker) instead of a full
-# rebuild when every file that changed since the last full build is under agent_tracker/.
-USE_OVERLAY=false
-if [ -f "$STATE_FILE" ] && docker image inspect "$IMAGE:latest" &> /dev/null; then
-  LAST_FULL_BUILD_SHA="$(cat "$STATE_FILE")"
-  if git cat-file -e "$LAST_FULL_BUILD_SHA" 2> /dev/null; then
-    CHANGED_FILES="$(git diff --name-only "$LAST_FULL_BUILD_SHA")"
-    if [ -z "$CHANGED_FILES" ] || ! printf '%s\n' "$CHANGED_FILES" | command grep -qvE "$AGENT_TRACKER_PATHS"; then
-      USE_OVERLAY=true
+echo "Starting docker build/push in the background. Logging to $LOG_FILE"
+
+(
+  trap 'rm -f "$LOCK_FILE"' EXIT
+
+  IMAGE="$DOCKERHUB_USERNAME/vllm-eviction"
+  TAG="$(git rev-parse --short HEAD)"
+  STATE_FILE=".docker_build_state"
+  AGENT_TRACKER_PATHS='^vllm/agent_tracker/|^vllm/entrypoints/openai/agent_tracker/'
+
+  echo "Logging in to Docker Hub as $DOCKERHUB_USERNAME..."
+  docker login --username "$DOCKERHUB_USERNAME" --password-stdin <<< "$DOCKERHUB_TOKEN"
+
+  # Use the fast agent_tracker overlay (docker/Dockerfile.agent_tracker) instead of a full
+  # rebuild when every file that changed since the last full build is under agent_tracker/.
+  USE_OVERLAY=false
+  if [ -f "$STATE_FILE" ] && docker image inspect "$IMAGE:latest" &> /dev/null; then
+    LAST_FULL_BUILD_SHA="$(cat "$STATE_FILE")"
+    if git cat-file -e "$LAST_FULL_BUILD_SHA" 2> /dev/null; then
+      CHANGED_FILES="$(git diff --name-only "$LAST_FULL_BUILD_SHA")"
+      if [ -z "$CHANGED_FILES" ] || ! printf '%s\n' "$CHANGED_FILES" | command grep -qvE "$AGENT_TRACKER_PATHS"; then
+        USE_OVERLAY=true
+      fi
     fi
   fi
-fi
 
-if [ "$USE_OVERLAY" = true ]; then
-  echo "Only agent_tracker files changed since last full build; using fast overlay build..."
-  docker build -f docker/Dockerfile.agent_tracker \
-    --build-arg BASE_IMAGE="$IMAGE:latest" \
-    -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
-else
-  echo "Building $IMAGE:$TAG (target vllm-openai)..."
-  docker build -f docker/Dockerfile --target vllm-openai \
-    --build-arg CUDA_VERSION=12.8.1 \
-    --build-arg max_jobs=40 \
-    --build-arg nvcc_threads=1 \
-    --build-arg RUN_WHEEL_CHECK=false \
-    -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
-  echo "$(git rev-parse HEAD)" > "$STATE_FILE"
-fi
+  if [ "$USE_OVERLAY" = true ]; then
+    echo "Only agent_tracker files changed since last full build; using fast overlay build..."
+    docker build -f docker/Dockerfile.agent_tracker \
+      --build-arg BASE_IMAGE="$IMAGE:latest" \
+      -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
+  else
+    echo "Building $IMAGE:$TAG (target vllm-openai)..."
+    docker build -f docker/Dockerfile --target vllm-openai \
+      --build-arg CUDA_VERSION=12.8.1 \
+      --build-arg max_jobs=40 \
+      --build-arg nvcc_threads=1 \
+      --build-arg RUN_WHEEL_CHECK=false \
+      -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
+    echo "$(git rev-parse HEAD)" > "$STATE_FILE"
+  fi
 
-echo "Pushing $IMAGE:$TAG and $IMAGE:latest..."
-docker push "$IMAGE:$TAG"
-docker push "$IMAGE:latest"
+  echo "Pushing $IMAGE:$TAG and $IMAGE:latest..."
+  docker push "$IMAGE:$TAG"
+  docker push "$IMAGE:latest"
 
-echo "Done: pushed $IMAGE:$TAG and $IMAGE:latest"
+  echo "Done: pushed $IMAGE:$TAG and $IMAGE:latest"
+) > "$LOG_FILE" 2>&1 < /dev/null &
+echo $! > "$LOCK_FILE"
+disown
+
+exit 0
