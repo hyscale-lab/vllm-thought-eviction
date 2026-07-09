@@ -521,14 +521,23 @@ class SessionTracker:
     """
 
     def __init__(
-        self, session_id: str, n_decay: int = 3,
+        self, session_id: str, n_decay: int | None = None,
         dedupe_cmd_output: bool = False,
+        supersede_reads: bool = True,
     ) -> None:
         self.session_id = session_id
+        # Time-decay is OFF by default (None): _apply_n_decay short-circuits, so
+        # eviction is driven by supersede_reads + dedupe_cmd_output unless an arm
+        # opts into a decay window. An int enables the round tail-guard window.
         self.n_decay = n_decay
         # Ablation knob, locked per-session at tracker creation (like n_decay):
         # content-hash dedupe of repeated run/exec + other-bash output.
         self.dedupe_cmd_output = dedupe_cmd_output
+        # Ablation knob, locked per-session at tracker creation (like n_decay):
+        # file-overlap supersession (superseded_by_later_read / _by_edit) in
+        # _reclassify_priors_for_new_turn. Default ON (legacy behavior); set
+        # False to run N-decay in isolation.
+        self.supersede_reads = supersede_reads
         self.prev_msg_count = 0
         self.request_idx = 0
         self.file_timeline = FileTimeline()
@@ -976,6 +985,15 @@ class SessionTracker:
             falling through to `decayed_N_turns` instead of
             `superseded_by_later_read=<search_idx>`.
         """
+        # Ablation gate: when supersede_reads is disabled, ALL file-overlap
+        # supersession below is a no-op -- both superseded_by_later_read (a
+        # later read/search of a file) AND superseded_by_edit (a later edit,
+        # which supersedes the now-stale earlier reads of that file). Eviction
+        # is then driven only by whatever else the arm enabled: N-decay (opt-in
+        # via AGENT_TRACKER_N_DECAY; OFF by default) and/or dedupe_cmd_output
+        # (its own gate).
+        if not self.supersede_reads:
+            return
         new_ts = self.evictable_map[new_turn_idx]
         if not new_ts.files_referenced:
             return
@@ -1071,6 +1089,9 @@ class SessionTracker:
             files appears in a LATER round within n_decay rounds, do NOT decay.
           - No-files obs turns (e.g. test runs) decay purely by round count.
         """
+        # Time-decay disabled (default): eviction is supersession/dedupe-driven.
+        if self.n_decay is None:
+            return
         n = len(self.evictable_map)
         states = self.evictable_map.all_turns()
         n_decay = self.n_decay
@@ -1273,23 +1294,28 @@ class SessionTrackerRegistry:
 
     def observe_request(
         self, *, session_id: str, n_decay: int | None = None,
-        dedupe_cmd_output: bool | None = None, **kwargs
+        dedupe_cmd_output: bool | None = None,
+        supersede_reads: bool | None = None, **kwargs
     ) -> dict:
         self._gc()
         if session_id not in self._sessions:
-            # n_decay / dedupe_cmd_output (if provided by the client) are
-            # per-session knobs, locked at tracker creation; later requests
-            # reuse the existing tracker.
+            # n_decay / dedupe_cmd_output / supersede_reads (if provided by the
+            # client) are per-session knobs, locked at tracker creation; later
+            # requests reuse the existing tracker.
             init_kwargs: dict = {}
             if n_decay is not None:
                 init_kwargs["n_decay"] = n_decay
             if dedupe_cmd_output is not None:
                 init_kwargs["dedupe_cmd_output"] = dedupe_cmd_output
+            if supersede_reads is not None:
+                init_kwargs["supersede_reads"] = supersede_reads
             self._sessions[session_id] = SessionTracker(session_id, **init_kwargs)
             logger.info(
-                "agent_tracker: new session %s (n_decay=%d, dedupe_cmd_output=%s)",
+                "agent_tracker: new session %s (n_decay=%s, dedupe_cmd_output=%s, "
+                "supersede_reads=%s)",
                 session_id, self._sessions[session_id].n_decay,
                 self._sessions[session_id].dedupe_cmd_output,
+                self._sessions[session_id].supersede_reads,
             )
         self._sessions.move_to_end(session_id)
         return self._sessions[session_id].observe_request(**kwargs)

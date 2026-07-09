@@ -354,6 +354,9 @@ class OpenAIServingChat(OpenAIServing):
                     dedupe_cmd_output=getattr(
                         request.agent_tracker, "dedupe_cmd_output", None
                     ),
+                    supersede_reads=getattr(
+                        request.agent_tracker, "supersede_reads", None
+                    ),
                     structured_messages=materialized_messages,
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,
@@ -416,7 +419,7 @@ class OpenAIServingChat(OpenAIServing):
                         # supersession arms reclaim only tool OUTPUT tokens; the
                         # `droptc` arm sets evict_tool_call to measure the marginal
                         # effect of also reclaiming the call.
-                        if getattr(request.agent_tracker, "evict_tool_call", False):
+                        if getattr(request.agent_tracker, "evict_tool_call", True):
                             rounds: dict[int, list[dict]] = {}
                             for turn in turns:
                                 rounds.setdefault(turn.get("round_idx"), []).append(turn)
