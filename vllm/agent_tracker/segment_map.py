@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from vllm.agent_tracker.read_spans import FileReadSpan
+
 
 @dataclass
 class TurnState:
@@ -17,6 +19,7 @@ class TurnState:
     category: str
     files_referenced: set[str] = field(default_factory=set)
     files_referenced_full: set[str] = field(default_factory=set)
+    read_spans: list[FileReadSpan] = field(default_factory=list)
     command: str | None = None
     is_edit: bool = False
     is_success: bool = True

@@ -44,6 +44,12 @@ class AgentTrackerParams(OpenAIBaseModel):
     # matches an earlier such turn supersedes it (reason superseded_by_repeat).
     # Per-session, locked at tracker creation like n_decay.
     dedupe_cmd_output: bool = Field(default=False)
+    # Ablation: aggressive read narrowing. When set, a later targeted exact
+    # line read can evict an earlier broader read of the same file
+    # (reason superseded_by_narrower_read). Per-session, locked at tracker
+    # creation like n_decay. Off by default because it may discard broader
+    # context the agent could still need.
+    evict_narrower_reads: bool = Field(default=False)
     # Ablation: epoch-batched (cache-friendly) eviction. When set to K>1, NEW
     # evictions are committed to the engine prompt only on requests whose round
     # sits on an epoch boundary (round % K == 0); turns already dropped stay
@@ -57,15 +63,25 @@ class AgentTrackerParams(OpenAIBaseModel):
     evict_epoch: int | None = Field(default=None, ge=1, le=9999)
 
 
+class ReadSpanOpportunity(OpenAIBaseModel):
+    """One file-read/search span observed for a turn."""
+    path: str
+    start_line: int | None = None
+    end_line: int | None = None
+    kind: str = "unknown"
+    confidence: str = "unknown"
+
+
 class TurnOpportunity(OpenAIBaseModel):
     """One row of the opportunity-endpoint response (D-16)."""
     turn_idx: int
     category: str
     evictable: bool
-    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_repeat | decayed_N_turns
+    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_narrower_read | superseded_by_repeat | decayed_N_turns
     msg_range: tuple[int, int]
     token_range: tuple[int, int]
     obs_token_range: tuple[int, int] | None = None
+    read_spans: list[ReadSpanOpportunity] = Field(default_factory=list)
     superseded_by: int | None = None
     # Agent round this turn belongs to (one request ~ one round).
     round_idx: int = 0

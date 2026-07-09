@@ -44,6 +44,11 @@ from vllm.agent_tracker.classifier import (
     normalize_observation_text,
 )
 from vllm.agent_tracker.file_timeline import FileTimeline
+from vllm.agent_tracker.read_spans import (
+    extract_read_spans_from_messages,
+    later_span_covers_prior,
+    later_span_is_narrower_than_prior,
+)
 from vllm.agent_tracker.segment_map import EvictableSegmentMap, TurnState
 from vllm.agent_tracker.token_index import (
     TokenSequenceIndex,
@@ -523,12 +528,16 @@ class SessionTracker:
     def __init__(
         self, session_id: str, n_decay: int = 3,
         dedupe_cmd_output: bool = False,
+        evict_narrower_reads: bool = False,
     ) -> None:
         self.session_id = session_id
         self.n_decay = n_decay
-        # Ablation knob, locked per-session at tracker creation (like n_decay):
-        # content-hash dedupe of repeated run/exec + other-bash output.
+        # Ablation knobs, locked per-session at tracker creation (like n_decay).
         self.dedupe_cmd_output = dedupe_cmd_output
+        # Aggressive read narrowing: a later targeted read can supersede an
+        # earlier broader read of the same file even when it does not cover all
+        # prior lines. Off by default; use only for measurement arms.
+        self.evict_narrower_reads = evict_narrower_reads
         self.prev_msg_count = 0
         self.request_idx = 0
         self.file_timeline = FileTimeline()
@@ -802,6 +811,7 @@ class SessionTracker:
                 category, command = _classify_new_messages(one, prefix)
                 files_full = _extract_files_from_messages(one, prefix)
                 files_basenames = {f.split("/")[-1] for f in files_full}
+                read_spans = extract_read_spans_from_messages(one, prefix)
 
                 token_range = (seg_start, seg_end)
                 token_count = seg_end - seg_start
@@ -852,6 +862,7 @@ class SessionTracker:
                     category=category,
                     files_referenced=files_basenames,
                     files_referenced_full=files_full,
+                    read_spans=read_spans,
                     command=command or None,
                     is_edit=(category == TOOL_FILE_EDIT),
                     is_success=True,
@@ -993,22 +1004,67 @@ class SessionTracker:
             # Provisional decay marks may still be upgraded.
             if prior.evictable and prior.eviction_reason != "decayed_N_turns":
                 continue
-            if _files_overlap(
+            if new_ts.is_edit and _files_overlap(
                 prior.files_referenced, new_ts.files_referenced,
                 prior.files_referenced_full, new_ts.files_referenced_full,
             ):
-                if new_ts.is_edit:
-                    prior.evictable = True
-                    prior.eviction_reason = "superseded_by_edit"
-                    prior.superseded_by = new_turn_idx
-                elif new_ts.category in (
-                    TOOL_FILE_READ, TOOL_FILE_SEARCH,
-                ):
+                prior.evictable = True
+                prior.eviction_reason = "superseded_by_edit"
+                prior.superseded_by = new_turn_idx
+            elif new_ts.category in (
+                TOOL_FILE_READ, TOOL_FILE_SEARCH,
+            ):
+                if self._read_spans_supersede(prior, new_ts):
                     # Correction (2): SEARCH is symmetric with READ for
-                    # supersession (mirror offline line 535).
+                    # supersession, but only when line spans show repeated
+                    # content. Same-file/different-region reads are kept until
+                    # ordinary decay.
                     prior.evictable = True
                     prior.eviction_reason = "superseded_by_later_read"
                     prior.superseded_by = new_turn_idx
+                elif (
+                    self.evict_narrower_reads
+                    and self._read_spans_narrow_prior(prior, new_ts)
+                ):
+                    prior.evictable = True
+                    prior.eviction_reason = "superseded_by_narrower_read"
+                    prior.superseded_by = new_turn_idx
+
+    def _read_spans_supersede(self, prior: TurnState,
+                              later: TurnState) -> bool:
+        """Return True when a later read/search covers a prior read span.
+
+        The serving hook still drops whole observation messages, so partial
+        overlap is not enough: the later span must cover the prior span, or be a
+        full-file read. Unknown/low-confidence spans are tracked but do not drive
+        supersession.
+        """
+        if not prior.read_spans or not later.read_spans:
+            return False
+        return all(
+            any(
+                later_span_covers_prior(prior_span, later_span)
+                for later_span in later.read_spans
+            )
+            for prior_span in prior.read_spans
+        )
+
+    def _read_spans_narrow_prior(self, prior: TurnState,
+                                 later: TurnState) -> bool:
+        """True when a later exact read is a narrower focus of a prior read.
+
+        This is deliberately stricter than span coverage because eviction still
+        drops the whole prior observation. We only allow a single-span prior (or
+        a full-file prior) to be narrowed by exact later line spans. Multi-span
+        prior observations may contain unrelated context and stay protected.
+        """
+        if len(prior.read_spans) != 1 or not later.read_spans:
+            return False
+        prior_span = prior.read_spans[0]
+        return all(
+            later_span_is_narrower_than_prior(prior_span, later_span)
+            for later_span in later.read_spans
+        )
 
     def _dedupe_repeated_output(self, new_turn_idx: int) -> None:
         """Content-hash dedupe of repeated command output (findings doc §5).
@@ -1223,6 +1279,16 @@ class SessionTracker:
                     "obs_token_range": (
                         list(ts.obs_token_range) if ts.obs_token_range else None
                     ),
+                    "read_spans": [
+                        {
+                            "path": span.path,
+                            "start_line": span.start_line,
+                            "end_line": span.end_line,
+                            "kind": span.kind,
+                            "confidence": span.confidence,
+                        }
+                        for span in ts.read_spans
+                    ],
                     "superseded_by": ts.superseded_by,
                     "round_idx": ts.round_idx,
                     "evicted_at_round": ts.evicted_at_round,
@@ -1273,23 +1339,28 @@ class SessionTrackerRegistry:
 
     def observe_request(
         self, *, session_id: str, n_decay: int | None = None,
-        dedupe_cmd_output: bool | None = None, **kwargs
+        dedupe_cmd_output: bool | None = None,
+        evict_narrower_reads: bool | None = None, **kwargs
     ) -> dict:
         self._gc()
         if session_id not in self._sessions:
-            # n_decay / dedupe_cmd_output (if provided by the client) are
-            # per-session knobs, locked at tracker creation; later requests
-            # reuse the existing tracker.
+            # n_decay / dedupe_cmd_output / evict_narrower_reads (if provided
+            # by the client) are per-session knobs, locked at tracker creation;
+            # later requests reuse the existing tracker.
             init_kwargs: dict = {}
             if n_decay is not None:
                 init_kwargs["n_decay"] = n_decay
             if dedupe_cmd_output is not None:
                 init_kwargs["dedupe_cmd_output"] = dedupe_cmd_output
+            if evict_narrower_reads is not None:
+                init_kwargs["evict_narrower_reads"] = evict_narrower_reads
             self._sessions[session_id] = SessionTracker(session_id, **init_kwargs)
             logger.info(
-                "agent_tracker: new session %s (n_decay=%d, dedupe_cmd_output=%s)",
+                "agent_tracker: new session %s (n_decay=%d, "
+                "dedupe_cmd_output=%s, evict_narrower_reads=%s)",
                 session_id, self._sessions[session_id].n_decay,
                 self._sessions[session_id].dedupe_cmd_output,
+                self._sessions[session_id].evict_narrower_reads,
             )
         self._sessions.move_to_end(session_id)
         return self._sessions[session_id].observe_request(**kwargs)
