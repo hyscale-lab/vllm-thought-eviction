@@ -37,11 +37,16 @@ from vllm.agent_tracker.classifier import (
     USER_TASK,
     OBSERVATION_CATEGORIES,
     DEDUPE_OUTPUT_CATEGORIES,
+    RUN_OUTPUT_CATEGORIES,
     _MIN_DEDUPE_CHARS,
     _classify_new_messages,
     _extract_files_from_messages,
     _files_overlap,
+    build_tool_call_args_map,
+    build_tool_call_fn_name_map,
     normalize_observation_text,
+    observation_is_failure,
+    run_target_files,
 )
 from vllm.agent_tracker.file_timeline import FileTimeline
 from vllm.agent_tracker.segment_map import EvictableSegmentMap, TurnState
@@ -524,6 +529,7 @@ class SessionTracker:
         self, session_id: str, n_decay: int | None = None,
         dedupe_cmd_output: bool = False,
         supersede_reads: bool = True,
+        supersede_reruns: bool = False,
     ) -> None:
         self.session_id = session_id
         # Time-decay is OFF by default (None): _apply_n_decay short-circuits, so
@@ -538,6 +544,11 @@ class SessionTracker:
         # _reclassify_priors_for_new_turn. Default ON (legacy behavior); set
         # False to run N-decay in isolation.
         self.supersede_reads = supersede_reads
+        # Ablation knob, locked per-session at tracker creation (like n_decay):
+        # run-target supersession -- a later run touching the same target file
+        # supersedes a prior run's output (keep-latest; the edit->run staleness
+        # edge rides supersede_reads). Default OFF; opt in per arm.
+        self.supersede_reruns = supersede_reruns
         self.prev_msg_count = 0
         self.request_idx = 0
         self.file_timeline = FileTimeline()
@@ -548,6 +559,12 @@ class SessionTracker:
         # turn indices that produced it, so a later identical-after-normalization
         # rerun can supersede the earlier copies.
         self._norm_hash_index: dict[bytes, list[int]] = {}
+        # Same-command keep-latest supersession: maps the normalized-COMMAND
+        # digest of a run/exec / other-bash observation to the turn indices
+        # that ran it, so a rerun of the same command supersedes the earlier
+        # outputs even when the OUTPUT changed (the norm-hash dedupe above only
+        # fires on identical-after-normalization output).
+        self._cmd_hash_index: dict[bytes, list[int]] = {}
         self.last_active = time.monotonic()
         # D-10: dynamic per-session no-evict zone. Computed on first
         # observe_request, locked thereafter. NOT a hardcoded constant -- the
@@ -831,6 +848,8 @@ class SessionTracker:
                 obs_hash: bytes | None = None
                 obs_token_range: tuple[int, int] | None = None
                 obs_norm_hash: bytes | None = None
+                cmd_norm_hash: bytes | None = None
+                is_success = True
                 if role in ("tool", "function"):
                     o_start, o_end = seg_start, seg_end
                     # Keep the snapped structural residual OUT of the evictable
@@ -845,6 +864,12 @@ class SessionTracker:
                     if obs_hash in self._all_obs_hashes_seen():
                         exact_match_hit = True
                     self.token_index.add(obs_hash, turn_idx)
+                    # Failure flag for run-output supersession policy: Hermes
+                    # tool results are JSON-wrapped with an exit_code; unknown
+                    # shapes stay is_success=True (conservative).
+                    if category in RUN_OUTPUT_CATEGORIES:
+                        is_success = not observation_is_failure(
+                            _message_text(msg))
                     # Content-hash dedupe key (run/exec + other-bash only):
                     # hash the NORMALIZED observation text so reruns that differ
                     # only in timing/addresses/tmp-paths collapse to one digest.
@@ -855,6 +880,23 @@ class SessionTracker:
                         norm = normalize_observation_text(_message_text(msg))
                         if len(norm) >= _MIN_DEDUPE_CHARS:
                             obs_norm_hash = hash_text(norm)
+                        # Same-command keep-latest key: the normalized COMMAND
+                        # (or structured exec fn name + code payload), so a
+                        # rerun supersedes the prior output even when the
+                        # output text changed.
+                        key_src = command
+                        if not key_src:
+                            tc_id = msg.get("tool_call_id", "")
+                            fn_name = build_tool_call_fn_name_map(
+                                prefix).get(tc_id, "")
+                            code = build_tool_call_args_map(
+                                prefix).get(tc_id, {}).get("code")
+                            if fn_name and isinstance(code, str) and code.strip():
+                                key_src = fn_name + "\x00" + code
+                        if key_src:
+                            cmd_key = normalize_observation_text(key_src)
+                            if cmd_key:
+                                cmd_norm_hash = hash_text(cmd_key)
 
                 ts = TurnState(
                     turn_idx=turn_idx,
@@ -863,7 +905,7 @@ class SessionTracker:
                     files_referenced_full=files_full,
                     command=command or None,
                     is_edit=(category == TOOL_FILE_EDIT),
-                    is_success=True,
+                    is_success=is_success,
                     token_count=token_count,
                     observation_tokens=obs_tokens,
                     reasoning_tokens=reasoning_tokens,
@@ -877,6 +919,7 @@ class SessionTracker:
                     obs_token_range=obs_token_range,
                     obs_token_hash=obs_hash,
                     obs_norm_hash=obs_norm_hash,
+                    cmd_norm_hash=cmd_norm_hash,
                     round_idx=cur_round,
                 )
                 self.evictable_map.append(ts)
@@ -903,6 +946,14 @@ class SessionTracker:
                 # Content-hash dedupe of repeated command output (no-op unless
                 # this session enabled dedupe_cmd_output).
                 self._dedupe_repeated_output(turn_idx)
+
+                # Same-command keep-latest supersession (rides
+                # dedupe_cmd_output, same gate as the output-hash dedupe).
+                self._supersede_same_command(turn_idx)
+
+                # Run-target supersession (no-op unless this session enabled
+                # supersede_reruns).
+                self._supersede_run_targets(turn_idx)
 
         # --- D-09 N-DECAY (re-apply over ALL turns after new appends) ---
         self._apply_n_decay()
@@ -1063,6 +1114,8 @@ class SessionTracker:
                 "superseded_by_later_read",
                 "superseded_by_edit",
                 "superseded_by_repeat",
+                "superseded_by_rerun",
+                "superseded_by_run_target",
             ):
                 continue
             prior.evictable = True
@@ -1071,6 +1124,112 @@ class SessionTracker:
         # Register this turn as the newest producer of `nh` so the next rerun
         # supersedes it in turn.
         self._norm_hash_index.setdefault(nh, []).append(new_turn_idx)
+
+    def _supersede_same_command(self, new_turn_idx: int) -> None:
+        """Same-command keep-latest supersession (rides ``dedupe_cmd_output``).
+
+        The output-hash dedupe above only fires when a rerun's output is
+        identical after normalization -- measured at <1% of exec-ish chars on
+        Hermes terminal-bench sessions, because the agent EDITS the code
+        between runs, so outputs differ. This closes the next gap: a rerun of
+        the SAME normalized command (`python server.py` after a code change,
+        a repeated curl probe) supersedes the prior output regardless of
+        whether the output changed -- the latest run reflects the current
+        state of the world; earlier ones are stale (keep-latest, mirroring
+        `superseded_by_later_read` semantics). Reason: ``superseded_by_rerun``.
+
+        Same-round siblings are skipped: parallel tool results of one agent
+        action are complementary, not stale.
+        """
+        if not self.dedupe_cmd_output:
+            return
+        new_ts = self.evictable_map[new_turn_idx]
+        if new_ts.category not in DEDUPE_OUTPUT_CATEGORIES:
+            return
+        ch = new_ts.cmd_norm_hash
+        if ch is None:
+            return
+        for prior_idx in self._cmd_hash_index.get(ch, ()):
+            prior = self.evictable_map[prior_idx]
+            if prior.round_idx == new_ts.round_idx:
+                continue
+            # First supersedor wins; provisional decay marks may upgrade.
+            if prior.evictable and prior.eviction_reason not in (
+                "essential", "decayed_N_turns",
+            ):
+                continue
+            prior.evictable = True
+            prior.eviction_reason = "superseded_by_rerun"
+            prior.superseded_by = new_turn_idx
+        self._cmd_hash_index.setdefault(ch, []).append(new_turn_idx)
+
+    def _supersede_run_targets(self, new_turn_idx: int) -> None:
+        """Run-target supersession (ablation knob ``supersede_reruns``).
+
+        The dominant stale mass in agent sessions is the iterative debug loop:
+        edit app.py -> run -> traceback -> edit -> run. The old run's output
+        describes a version of the code that no longer exists, but neither
+        output-hash dedupe (outputs differ) nor same-command keep-latest
+        (commands differ: heredoc code is edited) catches it. This method
+        generalizes file supersession to RUN OUTPUTS: when a new exec-ish
+        observation's target files overlap a prior exec-ish observation's,
+        the prior output is marked ``superseded_by_run_target`` (keep-latest;
+        first-supersedor-wins; decay marks may upgrade).
+
+        Policy guards:
+          - Targets exclude /tmp (`run_target_files`) so the exec bridge's
+            snapshot scratch files don't join every command into one class.
+          - Same-round siblings never supersede each other (parallel results
+            of one action are complementary).
+          - A TEST_RUN output may only be superseded by a later SUCCESSFUL
+            TEST_RUN (pass/fail trajectory stays distinguishable); failing
+            run/exec outputs may be superseded by any later run of the same
+            target (the fresh traceback replaces the stale one).
+
+        The edit->run staleness edge (a later FILE_EDIT of the executed file)
+        is intentionally NOT duplicated here: it already rides
+        ``supersede_reads`` via `_reclassify_priors_for_new_turn`, which
+        become effective for structured tools once file extraction covers
+        their args (see classifier `extract_files_from_tool_args`).
+        """
+        if not self.supersede_reruns:
+            return
+        new_ts = self.evictable_map[new_turn_idx]
+        if (
+            new_ts.category not in RUN_OUTPUT_CATEGORIES
+            or new_ts.obs_token_range is None
+        ):
+            return
+        new_full = run_target_files(new_ts.files_referenced_full)
+        if not new_full:
+            return
+        new_base = {f.split("/")[-1] for f in new_full}
+        for prior_idx in range(new_turn_idx):
+            prior = self.evictable_map[prior_idx]
+            if (
+                prior.category not in RUN_OUTPUT_CATEGORIES
+                or prior.obs_token_range is None
+            ):
+                continue
+            if prior.round_idx == new_ts.round_idx:
+                continue
+            # First supersedor wins; provisional decay marks may upgrade.
+            if prior.evictable and prior.eviction_reason not in (
+                "essential", "decayed_N_turns",
+            ):
+                continue
+            if prior.category == TOOL_TEST_RUN and not (
+                new_ts.category == TOOL_TEST_RUN and new_ts.is_success
+            ):
+                continue
+            prior_full = run_target_files(prior.files_referenced_full)
+            if not prior_full:
+                continue
+            prior_base = {f.split("/")[-1] for f in prior_full}
+            if _files_overlap(prior_base, new_base, prior_full, new_full):
+                prior.evictable = True
+                prior.eviction_reason = "superseded_by_run_target"
+                prior.superseded_by = new_turn_idx
 
     def _apply_n_decay(self) -> None:
         """
@@ -1295,13 +1454,14 @@ class SessionTrackerRegistry:
     def observe_request(
         self, *, session_id: str, n_decay: int | None = None,
         dedupe_cmd_output: bool | None = None,
-        supersede_reads: bool | None = None, **kwargs
+        supersede_reads: bool | None = None,
+        supersede_reruns: bool | None = None, **kwargs
     ) -> dict:
         self._gc()
         if session_id not in self._sessions:
-            # n_decay / dedupe_cmd_output / supersede_reads (if provided by the
-            # client) are per-session knobs, locked at tracker creation; later
-            # requests reuse the existing tracker.
+            # n_decay / dedupe_cmd_output / supersede_reads / supersede_reruns
+            # (if provided by the client) are per-session knobs, locked at
+            # tracker creation; later requests reuse the existing tracker.
             init_kwargs: dict = {}
             if n_decay is not None:
                 init_kwargs["n_decay"] = n_decay
@@ -1309,13 +1469,16 @@ class SessionTrackerRegistry:
                 init_kwargs["dedupe_cmd_output"] = dedupe_cmd_output
             if supersede_reads is not None:
                 init_kwargs["supersede_reads"] = supersede_reads
+            if supersede_reruns is not None:
+                init_kwargs["supersede_reruns"] = supersede_reruns
             self._sessions[session_id] = SessionTracker(session_id, **init_kwargs)
             logger.info(
                 "agent_tracker: new session %s (n_decay=%s, dedupe_cmd_output=%s, "
-                "supersede_reads=%s)",
+                "supersede_reads=%s, supersede_reruns=%s)",
                 session_id, self._sessions[session_id].n_decay,
                 self._sessions[session_id].dedupe_cmd_output,
                 self._sessions[session_id].supersede_reads,
+                self._sessions[session_id].supersede_reruns,
             )
         self._sessions.move_to_end(session_id)
         return self._sessions[session_id].observe_request(**kwargs)

@@ -357,6 +357,9 @@ class OpenAIServingChat(OpenAIServing):
                     supersede_reads=getattr(
                         request.agent_tracker, "supersede_reads", None
                     ),
+                    supersede_reruns=getattr(
+                        request.agent_tracker, "supersede_reruns", None
+                    ),
                     structured_messages=materialized_messages,
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,

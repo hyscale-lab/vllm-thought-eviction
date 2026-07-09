@@ -41,9 +41,19 @@ class AgentTrackerParams(OpenAIBaseModel):
     evict_tool_call: bool = Field(default=True)
     # Ablation: content-hash dedupe of repeated command output (run/exec +
     # other-bash). When set, a later turn whose normalized observation text
-    # matches an earlier such turn supersedes it (reason superseded_by_repeat).
+    # matches an earlier such turn supersedes it (reason superseded_by_repeat),
+    # and a rerun of the SAME normalized command supersedes the prior output
+    # even when the output changed (reason superseded_by_rerun, keep-latest).
     # Per-session, locked at tracker creation like n_decay.
     dedupe_cmd_output: bool = Field(default=False)
+    # Ablation: run-target supersession. When set, a later exec-ish observation
+    # (run/exec, other-bash, build, test) whose TARGET FILES overlap a prior
+    # exec-ish observation's supersedes it (reason superseded_by_run_target,
+    # keep-latest) -- the iterative edit->run->traceback loop makes old run
+    # output stale. Test outputs are only superseded by a later SUCCESSFUL test
+    # run of the same target. OFF by default; per-session, locked at tracker
+    # creation like n_decay.
+    supersede_reruns: bool = Field(default=False)
     # Ablation: Per-session N-decay tail-guard window (rounds). Time-decay is OFF by
     # default (SessionTracker n_decay=None => decay never fires); an arm opts in
     # by setting a window via the client's AGENT_TRACKER_N_DECAY knob. Higher =
@@ -71,7 +81,7 @@ class TurnOpportunity(OpenAIBaseModel):
     turn_idx: int
     category: str
     evictable: bool
-    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_repeat | decayed_N_turns
+    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_repeat | superseded_by_rerun | superseded_by_run_target | decayed_N_turns
     msg_range: tuple[int, int]
     token_range: tuple[int, int]
     obs_token_range: tuple[int, int] | None = None
