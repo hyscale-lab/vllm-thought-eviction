@@ -528,12 +528,24 @@ class SessionTracker:
     def __init__(
         self, session_id: str, n_decay: int = 3,
         dedupe_cmd_output: bool = False,
+        evict_web_search: bool = False,
+        evict_web_fetch: bool = False,
     ) -> None:
         self.session_id = session_id
         self.n_decay = n_decay
         # Ablation knob, locked per-session at tracker creation (like n_decay):
         # content-hash dedupe of repeated run/exec + other-bash output.
         self.dedupe_cmd_output = dedupe_cmd_output
+        # Ablation knobs (D-20), locked per-session like the above: gate the
+        # two web supersession rules independently so each can be measured on
+        # its own. Off by default -- the web_search/web_fetch categories are
+        # still tracked/reported either way, only the eviction is gated.
+        #   evict_web_search: a NEW web_search supersedes every earlier
+        #     not-yet-superseded web_search (superseded_by_new_search).
+        #   evict_web_fetch: a web_fetch supersedes the web_search turn whose
+        #     URL it consumed (superseded_by_fetch).
+        self.evict_web_search = evict_web_search
+        self.evict_web_fetch = evict_web_fetch
         self.prev_msg_count = 0
         self.request_idx = 0
         self.file_timeline = FileTimeline()
@@ -1053,7 +1065,14 @@ class SessionTracker:
         OBSERVATION turns are eligible (obs_token_range is not None), and the
         FIRST supersedor wins (provisional `decayed_N_turns` marks may still be
         upgraded, matching offline forward-scan semantics).
+
+        Each rule is independently gated by its own ablation knob
+        (`self.evict_web_fetch` / `self.evict_web_search`) so the two can be
+        measured separately; both off by default -- the turns are still
+        classified/tracked either way, only the eviction is gated.
         """
+        if not self.evict_web_search and not self.evict_web_fetch:
+            return
         new_ts = self.evictable_map[new_turn_idx]
         if new_ts.category not in (TOOL_WEB_SEARCH, TOOL_WEB_FETCH):
             return
@@ -1064,14 +1083,17 @@ class SessionTracker:
             if prior.evictable and prior.eviction_reason != "decayed_N_turns":
                 continue
             if new_ts.category == TOOL_WEB_FETCH:
-                if new_ts.urls_referenced & prior.urls_referenced:
+                if self.evict_web_fetch and (
+                    new_ts.urls_referenced & prior.urls_referenced
+                ):
                     prior.evictable = True
                     prior.eviction_reason = "superseded_by_fetch"
                     prior.superseded_by = new_turn_idx
             else:  # new_ts.category == TOOL_WEB_SEARCH
-                prior.evictable = True
-                prior.eviction_reason = "superseded_by_new_search"
-                prior.superseded_by = new_turn_idx
+                if self.evict_web_search:
+                    prior.evictable = True
+                    prior.eviction_reason = "superseded_by_new_search"
+                    prior.superseded_by = new_turn_idx
 
     def _dedupe_repeated_output(self, new_turn_idx: int) -> None:
         """Content-hash dedupe of repeated command output (findings doc §5).
@@ -1337,23 +1359,32 @@ class SessionTrackerRegistry:
 
     def observe_request(
         self, *, session_id: str, n_decay: int | None = None,
-        dedupe_cmd_output: bool | None = None, **kwargs
+        dedupe_cmd_output: bool | None = None,
+        evict_web_search: bool | None = None,
+        evict_web_fetch: bool | None = None, **kwargs
     ) -> dict:
         self._gc()
         if session_id not in self._sessions:
-            # n_decay / dedupe_cmd_output (if provided by the client) are
-            # per-session knobs, locked at tracker creation; later requests
-            # reuse the existing tracker.
+            # n_decay / dedupe_cmd_output / evict_web_search / evict_web_fetch
+            # (if provided by the client) are per-session knobs, locked at
+            # tracker creation; later requests reuse the existing tracker.
             init_kwargs: dict = {}
             if n_decay is not None:
                 init_kwargs["n_decay"] = n_decay
             if dedupe_cmd_output is not None:
                 init_kwargs["dedupe_cmd_output"] = dedupe_cmd_output
+            if evict_web_search is not None:
+                init_kwargs["evict_web_search"] = evict_web_search
+            if evict_web_fetch is not None:
+                init_kwargs["evict_web_fetch"] = evict_web_fetch
             self._sessions[session_id] = SessionTracker(session_id, **init_kwargs)
             logger.info(
-                "agent_tracker: new session %s (n_decay=%d, dedupe_cmd_output=%s)",
+                "agent_tracker: new session %s (n_decay=%d, dedupe_cmd_output=%s, "
+                "evict_web_search=%s, evict_web_fetch=%s)",
                 session_id, self._sessions[session_id].n_decay,
                 self._sessions[session_id].dedupe_cmd_output,
+                self._sessions[session_id].evict_web_search,
+                self._sessions[session_id].evict_web_fetch,
             )
         self._sessions.move_to_end(session_id)
         return self._sessions[session_id].observe_request(**kwargs)

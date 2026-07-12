@@ -354,6 +354,12 @@ class OpenAIServingChat(OpenAIServing):
                     dedupe_cmd_output=getattr(
                         request.agent_tracker, "dedupe_cmd_output", None
                     ),
+                    evict_web_search=getattr(
+                        request.agent_tracker, "evict_web_search", None
+                    ),
+                    evict_web_fetch=getattr(
+                        request.agent_tracker, "evict_web_fetch", None
+                    ),
                     structured_messages=materialized_messages,
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,

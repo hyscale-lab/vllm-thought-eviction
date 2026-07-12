@@ -55,6 +55,17 @@ class AgentTrackerParams(OpenAIBaseModel):
     # Per-request gate applied in serving.py Pass 1; None/1 = evict every
     # request (legacy behavior).
     evict_epoch: int | None = Field(default=None, ge=1, le=9999)
+    # Ablation (D-20): a NEW web_search supersedes every earlier
+    # not-yet-superseded web_search turn (reason superseded_by_new_search),
+    # regardless of URL overlap between the two queries -- a rephrased query
+    # still means the agent moved past the old results. Off by default;
+    # per-session, locked at tracker creation like n_decay.
+    evict_web_search: bool = Field(default=False)
+    # Ablation (D-20): a web_fetch supersedes the web_search turn whose URL it
+    # consumed (reason superseded_by_fetch) -- the fetched page content
+    # replaces the raw search snippet. Off by default; per-session, locked at
+    # tracker creation like n_decay.
+    evict_web_fetch: bool = Field(default=False)
 
 
 class TurnOpportunity(OpenAIBaseModel):
