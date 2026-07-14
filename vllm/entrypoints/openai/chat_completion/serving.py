@@ -454,6 +454,24 @@ class OpenAIServingChat(OpenAIServing):
                         if drop_indices:
                             # Use prompt_token_ids which is guaranteed to be extracted correctly
                             old_tokens = prompt_token_ids
+                            # Defense in depth: a turn's obs_token_range/token_range can only
+                            # go stale (pointing past the current, possibly-shorter prompt) if
+                            # the tracker's incremental state fell out of sync with the resent
+                            # history -- is_diverged()/should_reset() above are meant to catch
+                            # that and rebuild from scratch, but this guards the actual prompt
+                            # splice even if a divergence case slips through undetected.
+                            stale_indices = [
+                                idx for idx in drop_indices if idx >= len(old_tokens)
+                            ]
+                            if stale_indices:
+                                logger.warning(
+                                    "agent_tracker: session %s has %d stale drop "
+                                    "indices beyond the current prompt length (%d); "
+                                    "tracker state may be out of sync with the resent "
+                                    "history -- ignoring them",
+                                    request.agent_tracker.session_id,
+                                    len(stale_indices), len(old_tokens),
+                                )
                             new_tokens = [
                                 tok for idx, tok in enumerate(old_tokens)
                                 if idx not in drop_indices
@@ -462,7 +480,11 @@ class OpenAIServingChat(OpenAIServing):
                             # Remove the raw text prompt so the engine is forced to use the
                             # truncated token sequence, avoiding mismatch.
                             engine_inputs[0].pop("prompt", None)
-                            filtered_count = len(drop_indices)
+                            # Actual removed-token count (old_tokens - new_tokens), NOT
+                            # len(drop_indices) -- a stale/out-of-range index inflates the
+                            # latter without removing anything, which is exactly what
+                            # produced negative post_evict_prefill_tokens downstream.
+                            filtered_count = len(old_tokens) - len(new_tokens)
                             # Record the round at which each turn was FIRST dropped
                             # (first-drop wins; re-dropped turns return nothing) so
                             # the opportunity JSON / metrics show WHEN a section left

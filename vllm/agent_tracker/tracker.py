@@ -596,7 +596,7 @@ class SessionTracker:
         only APPENDS messages; when that breaks the tracker must reset (the hook
         calls registry.should_reset -> registry.reset).
 
-        Two triggers:
+        Three triggers:
 
         (a) SHRINK -- the request has fewer messages than we've already
             processed. The dominant cause in practice is a client-side context
@@ -610,14 +610,32 @@ class SessionTracker:
         (b) FRAMING MUTATION -- same-or-greater message count but the immutable
             leading system + first-user framing changed, meaning a different
             conversation reused this session_id.
+
+        (c) CONTENT MUTATION -- same-or-greater message count, framing intact,
+            but one or more of the already-observed messages (indices
+            [0, prev_msg_count)) was rewritten in place -- e.g. a harness (e.g.
+            OpenClaw) that compacts by summarizing/truncating earlier tool
+            output *within existing message slots* rather than dropping
+            messages outright. (a) and (b) both miss this: message count
+            doesn't shrink and the leading system + first-user block is
+            untouched. Left undetected, the per-message TurnStates already
+            built for those indices keep stale obs_token_range offsets sized
+            for the OLD (longer) prompt; applying them as drop indices against
+            the NEW (shorter) prompt can filter more tokens than the prompt
+            contains, driving post-eviction token counts negative and
+            corrupting the served prompt. Detected by comparing the incoming
+            prefix against the exact message list this tracker last observed.
         """
         if len(structured_messages) < self.prev_msg_count:
             return True
         if self._all_messages and self.prev_msg_count > 0:
-            return (
+            if (
                 _framing_signature(structured_messages)
                 != _framing_signature(self._all_messages)
-            )
+            ):
+                return True
+            if structured_messages[:self.prev_msg_count] != self._all_messages:
+                return True
         return False
 
     # ----- D-10 dynamic no-evict zone helper ----------------------------
