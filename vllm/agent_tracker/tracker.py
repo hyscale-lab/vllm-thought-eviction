@@ -39,12 +39,17 @@ from vllm.agent_tracker.classifier import (
     USER_TASK,
     OBSERVATION_CATEGORIES,
     DEDUPE_OUTPUT_CATEGORIES,
+    RUN_OUTPUT_CATEGORIES,
     _MIN_DEDUPE_CHARS,
     _classify_new_messages,
     _extract_files_from_messages,
     _extract_urls_from_messages,
     _files_overlap,
+    build_tool_call_args_map,
+    build_tool_call_fn_name_map,
     normalize_observation_text,
+    observation_is_failure,
+    run_target_files,
 )
 from vllm.agent_tracker.file_timeline import FileTimeline
 from vllm.agent_tracker.segment_map import EvictableSegmentMap, TurnState
@@ -526,16 +531,31 @@ class SessionTracker:
     """
 
     def __init__(
-        self, session_id: str, n_decay: int = 3,
+        self, session_id: str, n_decay: int | None = None,
         dedupe_cmd_output: bool = False,
+        supersede_reads: bool = True,
+        supersede_reruns: bool = False,
         evict_web_search: bool = False,
         evict_web_fetch: bool = False,
     ) -> None:
         self.session_id = session_id
+        # Time-decay is OFF by default (None): _apply_n_decay short-circuits, so
+        # eviction is driven by supersede_reads + dedupe_cmd_output unless an arm
+        # opts into a decay window. An int enables the round tail-guard window.
         self.n_decay = n_decay
         # Ablation knob, locked per-session at tracker creation (like n_decay):
         # content-hash dedupe of repeated run/exec + other-bash output.
         self.dedupe_cmd_output = dedupe_cmd_output
+        # Ablation knob, locked per-session at tracker creation (like n_decay):
+        # file-overlap supersession (superseded_by_later_read / _by_edit) in
+        # _reclassify_priors_for_new_turn. Default ON (legacy behavior); set
+        # False to run N-decay in isolation.
+        self.supersede_reads = supersede_reads
+        # Ablation knob, locked per-session at tracker creation (like n_decay):
+        # run-target supersession -- a later run touching the same target file
+        # supersedes a prior run's output (keep-latest; the edit->run staleness
+        # edge rides supersede_reads). Default OFF; opt in per arm.
+        self.supersede_reruns = supersede_reruns
         # Ablation knobs (D-20), locked per-session like the above: gate the
         # two web supersession rules independently so each can be measured on
         # its own. Off by default -- the web_search/web_fetch categories are
@@ -557,6 +577,12 @@ class SessionTracker:
         # turn indices that produced it, so a later identical-after-normalization
         # rerun can supersede the earlier copies.
         self._norm_hash_index: dict[bytes, list[int]] = {}
+        # Same-command keep-latest supersession: maps the normalized-COMMAND
+        # digest of a run/exec / other-bash observation to the turn indices
+        # that ran it, so a rerun of the same command supersedes the earlier
+        # outputs even when the OUTPUT changed (the norm-hash dedupe above only
+        # fires on identical-after-normalization output).
+        self._cmd_hash_index: dict[bytes, list[int]] = {}
         self.last_active = time.monotonic()
         # D-10: dynamic per-session no-evict zone. Computed on first
         # observe_request, locked thereafter. NOT a hardcoded constant -- the
@@ -588,7 +614,7 @@ class SessionTracker:
         only APPENDS messages; when that breaks the tracker must reset (the hook
         calls registry.should_reset -> registry.reset).
 
-        Two triggers:
+        Three triggers:
 
         (a) SHRINK -- the request has fewer messages than we've already
             processed. The dominant cause in practice is a client-side context
@@ -602,14 +628,32 @@ class SessionTracker:
         (b) FRAMING MUTATION -- same-or-greater message count but the immutable
             leading system + first-user framing changed, meaning a different
             conversation reused this session_id.
+
+        (c) CONTENT MUTATION -- same-or-greater message count, framing intact,
+            but one or more of the already-observed messages (indices
+            [0, prev_msg_count)) was rewritten in place -- e.g. a harness (e.g.
+            OpenClaw) that compacts by summarizing/truncating earlier tool
+            output *within existing message slots* rather than dropping
+            messages outright. (a) and (b) both miss this: message count
+            doesn't shrink and the leading system + first-user block is
+            untouched. Left undetected, the per-message TurnStates already
+            built for those indices keep stale obs_token_range offsets sized
+            for the OLD (longer) prompt; applying them as drop indices against
+            the NEW (shorter) prompt can filter more tokens than the prompt
+            contains, driving post-eviction token counts negative and
+            corrupting the served prompt. Detected by comparing the incoming
+            prefix against the exact message list this tracker last observed.
         """
         if len(structured_messages) < self.prev_msg_count:
             return True
         if self._all_messages and self.prev_msg_count > 0:
-            return (
+            if (
                 _framing_signature(structured_messages)
                 != _framing_signature(self._all_messages)
-            )
+            ):
+                return True
+            if structured_messages[:self.prev_msg_count] != self._all_messages:
+                return True
         return False
 
     # ----- D-10 dynamic no-evict zone helper ----------------------------
@@ -841,6 +885,8 @@ class SessionTracker:
                 obs_hash: bytes | None = None
                 obs_token_range: tuple[int, int] | None = None
                 obs_norm_hash: bytes | None = None
+                cmd_norm_hash: bytes | None = None
+                is_success = True
                 if role in ("tool", "function"):
                     o_start, o_end = seg_start, seg_end
                     # Keep the snapped structural residual OUT of the evictable
@@ -855,6 +901,12 @@ class SessionTracker:
                     if obs_hash in self._all_obs_hashes_seen():
                         exact_match_hit = True
                     self.token_index.add(obs_hash, turn_idx)
+                    # Failure flag for run-output supersession policy: Hermes
+                    # tool results are JSON-wrapped with an exit_code; unknown
+                    # shapes stay is_success=True (conservative).
+                    if category in RUN_OUTPUT_CATEGORIES:
+                        is_success = not observation_is_failure(
+                            _message_text(msg))
                     # Content-hash dedupe key (run/exec + other-bash only):
                     # hash the NORMALIZED observation text so reruns that differ
                     # only in timing/addresses/tmp-paths collapse to one digest.
@@ -865,6 +917,23 @@ class SessionTracker:
                         norm = normalize_observation_text(_message_text(msg))
                         if len(norm) >= _MIN_DEDUPE_CHARS:
                             obs_norm_hash = hash_text(norm)
+                        # Same-command keep-latest key: the normalized COMMAND
+                        # (or structured exec fn name + code payload), so a
+                        # rerun supersedes the prior output even when the
+                        # output text changed.
+                        key_src = command
+                        if not key_src:
+                            tc_id = msg.get("tool_call_id", "")
+                            fn_name = build_tool_call_fn_name_map(
+                                prefix).get(tc_id, "")
+                            code = build_tool_call_args_map(
+                                prefix).get(tc_id, {}).get("code")
+                            if fn_name and isinstance(code, str) and code.strip():
+                                key_src = fn_name + "\x00" + code
+                        if key_src:
+                            cmd_key = normalize_observation_text(key_src)
+                            if cmd_key:
+                                cmd_norm_hash = hash_text(cmd_key)
 
                 ts = TurnState(
                     turn_idx=turn_idx,
@@ -874,7 +943,7 @@ class SessionTracker:
                     urls_referenced=urls_referenced,
                     command=command or None,
                     is_edit=(category == TOOL_FILE_EDIT),
-                    is_success=True,
+                    is_success=is_success,
                     token_count=token_count,
                     observation_tokens=obs_tokens,
                     reasoning_tokens=reasoning_tokens,
@@ -888,6 +957,7 @@ class SessionTracker:
                     obs_token_range=obs_token_range,
                     obs_token_hash=obs_hash,
                     obs_norm_hash=obs_norm_hash,
+                    cmd_norm_hash=cmd_norm_hash,
                     round_idx=cur_round,
                 )
                 self.evictable_map.append(ts)
@@ -928,6 +998,14 @@ class SessionTracker:
                 # Content-hash dedupe of repeated command output (no-op unless
                 # this session enabled dedupe_cmd_output).
                 self._dedupe_repeated_output(turn_idx)
+
+                # Same-command keep-latest supersession (rides
+                # dedupe_cmd_output, same gate as the output-hash dedupe).
+                self._supersede_same_command(turn_idx)
+
+                # Run-target supersession (no-op unless this session enabled
+                # supersede_reruns).
+                self._supersede_run_targets(turn_idx)
 
         # --- D-09 N-DECAY (re-apply over ALL turns after new appends) ---
         self._apply_n_decay()
@@ -1010,6 +1088,15 @@ class SessionTracker:
             falling through to `decayed_N_turns` instead of
             `superseded_by_later_read=<search_idx>`.
         """
+        # Ablation gate: when supersede_reads is disabled, ALL file-overlap
+        # supersession below is a no-op -- both superseded_by_later_read (a
+        # later read/search of a file) AND superseded_by_edit (a later edit,
+        # which supersedes the now-stale earlier reads of that file). Eviction
+        # is then driven only by whatever else the arm enabled: N-decay (opt-in
+        # via AGENT_TRACKER_N_DECAY; OFF by default) and/or dedupe_cmd_output
+        # (its own gate).
+        if not self.supersede_reads:
+            return
         new_ts = self.evictable_map[new_turn_idx]
         if not new_ts.files_referenced:
             return
@@ -1130,6 +1217,8 @@ class SessionTracker:
                 "superseded_by_later_read",
                 "superseded_by_edit",
                 "superseded_by_repeat",
+                "superseded_by_rerun",
+                "superseded_by_run_target",
             ):
                 continue
             prior.evictable = True
@@ -1138,6 +1227,112 @@ class SessionTracker:
         # Register this turn as the newest producer of `nh` so the next rerun
         # supersedes it in turn.
         self._norm_hash_index.setdefault(nh, []).append(new_turn_idx)
+
+    def _supersede_same_command(self, new_turn_idx: int) -> None:
+        """Same-command keep-latest supersession (rides ``dedupe_cmd_output``).
+
+        The output-hash dedupe above only fires when a rerun's output is
+        identical after normalization -- measured at <1% of exec-ish chars on
+        Hermes terminal-bench sessions, because the agent EDITS the code
+        between runs, so outputs differ. This closes the next gap: a rerun of
+        the SAME normalized command (`python server.py` after a code change,
+        a repeated curl probe) supersedes the prior output regardless of
+        whether the output changed -- the latest run reflects the current
+        state of the world; earlier ones are stale (keep-latest, mirroring
+        `superseded_by_later_read` semantics). Reason: ``superseded_by_rerun``.
+
+        Same-round siblings are skipped: parallel tool results of one agent
+        action are complementary, not stale.
+        """
+        if not self.dedupe_cmd_output:
+            return
+        new_ts = self.evictable_map[new_turn_idx]
+        if new_ts.category not in DEDUPE_OUTPUT_CATEGORIES:
+            return
+        ch = new_ts.cmd_norm_hash
+        if ch is None:
+            return
+        for prior_idx in self._cmd_hash_index.get(ch, ()):
+            prior = self.evictable_map[prior_idx]
+            if prior.round_idx == new_ts.round_idx:
+                continue
+            # First supersedor wins; provisional decay marks may upgrade.
+            if prior.evictable and prior.eviction_reason not in (
+                "essential", "decayed_N_turns",
+            ):
+                continue
+            prior.evictable = True
+            prior.eviction_reason = "superseded_by_rerun"
+            prior.superseded_by = new_turn_idx
+        self._cmd_hash_index.setdefault(ch, []).append(new_turn_idx)
+
+    def _supersede_run_targets(self, new_turn_idx: int) -> None:
+        """Run-target supersession (ablation knob ``supersede_reruns``).
+
+        The dominant stale mass in agent sessions is the iterative debug loop:
+        edit app.py -> run -> traceback -> edit -> run. The old run's output
+        describes a version of the code that no longer exists, but neither
+        output-hash dedupe (outputs differ) nor same-command keep-latest
+        (commands differ: heredoc code is edited) catches it. This method
+        generalizes file supersession to RUN OUTPUTS: when a new exec-ish
+        observation's target files overlap a prior exec-ish observation's,
+        the prior output is marked ``superseded_by_run_target`` (keep-latest;
+        first-supersedor-wins; decay marks may upgrade).
+
+        Policy guards:
+          - Targets exclude /tmp (`run_target_files`) so the exec bridge's
+            snapshot scratch files don't join every command into one class.
+          - Same-round siblings never supersede each other (parallel results
+            of one action are complementary).
+          - A TEST_RUN output may only be superseded by a later SUCCESSFUL
+            TEST_RUN (pass/fail trajectory stays distinguishable); failing
+            run/exec outputs may be superseded by any later run of the same
+            target (the fresh traceback replaces the stale one).
+
+        The edit->run staleness edge (a later FILE_EDIT of the executed file)
+        is intentionally NOT duplicated here: it already rides
+        ``supersede_reads`` via `_reclassify_priors_for_new_turn`, which
+        become effective for structured tools once file extraction covers
+        their args (see classifier `extract_files_from_tool_args`).
+        """
+        if not self.supersede_reruns:
+            return
+        new_ts = self.evictable_map[new_turn_idx]
+        if (
+            new_ts.category not in RUN_OUTPUT_CATEGORIES
+            or new_ts.obs_token_range is None
+        ):
+            return
+        new_full = run_target_files(new_ts.files_referenced_full)
+        if not new_full:
+            return
+        new_base = {f.split("/")[-1] for f in new_full}
+        for prior_idx in range(new_turn_idx):
+            prior = self.evictable_map[prior_idx]
+            if (
+                prior.category not in RUN_OUTPUT_CATEGORIES
+                or prior.obs_token_range is None
+            ):
+                continue
+            if prior.round_idx == new_ts.round_idx:
+                continue
+            # First supersedor wins; provisional decay marks may upgrade.
+            if prior.evictable and prior.eviction_reason not in (
+                "essential", "decayed_N_turns",
+            ):
+                continue
+            if prior.category == TOOL_TEST_RUN and not (
+                new_ts.category == TOOL_TEST_RUN and new_ts.is_success
+            ):
+                continue
+            prior_full = run_target_files(prior.files_referenced_full)
+            if not prior_full:
+                continue
+            prior_base = {f.split("/")[-1] for f in prior_full}
+            if _files_overlap(prior_base, new_base, prior_full, new_full):
+                prior.evictable = True
+                prior.eviction_reason = "superseded_by_run_target"
+                prior.superseded_by = new_turn_idx
 
     def _apply_n_decay(self) -> None:
         """
@@ -1156,6 +1351,9 @@ class SessionTracker:
             files appears in a LATER round within n_decay rounds, do NOT decay.
           - No-files obs turns (e.g. test runs) decay purely by round count.
         """
+        # Time-decay disabled (default): eviction is supersession/dedupe-driven.
+        if self.n_decay is None:
+            return
         n = len(self.evictable_map)
         states = self.evictable_map.all_turns()
         n_decay = self.n_decay
@@ -1360,12 +1558,14 @@ class SessionTrackerRegistry:
     def observe_request(
         self, *, session_id: str, n_decay: int | None = None,
         dedupe_cmd_output: bool | None = None,
+        supersede_reads: bool | None = None,
+        supersede_reruns: bool | None = None,
         evict_web_search: bool | None = None,
         evict_web_fetch: bool | None = None, **kwargs
     ) -> dict:
         self._gc()
         if session_id not in self._sessions:
-            # n_decay / dedupe_cmd_output / evict_web_search / evict_web_fetch
+            # n_decay / dedupe_cmd_output / supersede_reads / supersede_reruns / evict_web_search / evict_web_fetch
             # (if provided by the client) are per-session knobs, locked at
             # tracker creation; later requests reuse the existing tracker.
             init_kwargs: dict = {}
@@ -1373,16 +1573,23 @@ class SessionTrackerRegistry:
                 init_kwargs["n_decay"] = n_decay
             if dedupe_cmd_output is not None:
                 init_kwargs["dedupe_cmd_output"] = dedupe_cmd_output
+            if supersede_reads is not None:
+                init_kwargs["supersede_reads"] = supersede_reads
+            if supersede_reruns is not None:
+                init_kwargs["supersede_reruns"] = supersede_reruns
             if evict_web_search is not None:
                 init_kwargs["evict_web_search"] = evict_web_search
             if evict_web_fetch is not None:
                 init_kwargs["evict_web_fetch"] = evict_web_fetch
             self._sessions[session_id] = SessionTracker(session_id, **init_kwargs)
             logger.info(
-                "agent_tracker: new session %s (n_decay=%d, dedupe_cmd_output=%s, "
+                "agent_tracker: new session %s (n_decay=%s, dedupe_cmd_output=%s, "
+                "supersede_reads=%s, supersede_reruns=%s, "
                 "evict_web_search=%s, evict_web_fetch=%s)",
                 session_id, self._sessions[session_id].n_decay,
                 self._sessions[session_id].dedupe_cmd_output,
+                self._sessions[session_id].supersede_reads,
+                self._sessions[session_id].supersede_reruns,
                 self._sessions[session_id].evict_web_search,
                 self._sessions[session_id].evict_web_fetch,
             )

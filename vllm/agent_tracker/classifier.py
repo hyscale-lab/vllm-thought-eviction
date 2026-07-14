@@ -295,6 +295,58 @@ def build_tool_call_url_map(messages: list) -> dict:
     return mapping
 
 
+def build_tool_call_args_map(messages: list) -> dict:
+    """Map tool_call_id -> parsed arguments dict.
+
+    Third companion to build_tool_call_command_map / _fn_name_map: structured
+    tools (Hermes `read_file`/`patch`/`write_file`/`execute_code`) carry their
+    file identity in `path`-like or `code` args, NOT in a bash `command`, so
+    file extraction for their tool-RESULT turns must go through the parsed
+    args. Unparseable / non-dict arguments map to {}.
+    """
+    mapping: dict = {}
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        for tc in (msg.get("tool_calls") or []):
+            tc_id = tc.get("id") or tc.get("tool_call_id")
+            if not tc_id:
+                continue
+            fn = tc.get("function") or {}
+            args_raw = fn.get("arguments") or "{}"
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except Exception:
+                args = {}
+            mapping[tc_id] = args if isinstance(args, dict) else {}
+    return mapping
+
+
+# Structured-tool argument keys that name a file directly (taken verbatim as a
+# path) vs. keys carrying a code payload (scanned with _FILE_PATH_RE, so a
+# heredoc-style script's file references join the turn's file set). `content`
+# / `text` args are deliberately NOT scanned: file BODIES routinely mention
+# many unrelated paths and would over-link supersession.
+_PATH_ARG_KEYS = ("path", "file_path", "filename", "file", "target_file")
+_CODE_ARG_KEYS = ("code",)
+
+
+def extract_files_from_tool_args(args: dict) -> set[str]:
+    """File paths referenced by a structured tool call's parsed arguments."""
+    files: set[str] = set()
+    if not isinstance(args, dict):
+        return files
+    for key in _PATH_ARG_KEYS:
+        v = args.get(key)
+        if isinstance(v, str) and v.strip():
+            files.add(v.strip())
+    for key in _CODE_ARG_KEYS:
+        v = args.get(key)
+        if isinstance(v, str) and v:
+            files.update(_FILE_PATH_RE.findall(v))
+    return files
+
+
 # Structured-tool function-name -> intent. Checked in EDIT, SEARCH, READ order so
 # e.g. "rewrite"/"str_replace" (contain "write"/"replace") classify as edit, not
 # read, and "file_search" classifies as search. Names vary across agents, so both
@@ -309,8 +361,11 @@ _STRUCT_READ_KEYS = ("read", "view", "cat", "open_file", "openfile", "show_file"
 # Code-execution tools that carry a `code` arg (not a `command`), so they miss
 # the bash path entirely. Hermes `execute_code` is the canonical case. Checked
 # LAST so file tools whose names happen to contain "run"/"exec" still win.
+# "process" covers process-status tools (Hermes `process`): they report on a
+# running exec, so their output belongs in the run/exec bucket, not TOOL_OTHER.
 _STRUCT_EXEC_KEYS = ("execute_code", "run_code", "code_exec", "code_interpreter",
-                     "python_exec", "ipython", "jupyter", "execute", "run_python")
+                     "python_exec", "ipython", "jupyter", "execute", "run_python",
+                     "process")
 
 
 def classify_structured_tool(fn_name: str) -> str:
@@ -338,6 +393,25 @@ def classify_structured_tool(fn_name: str) -> str:
     return ""
 
 
+# Test-by-filename heuristic: `python3 test_foo.py`, `./tests/run.sh`,
+# `python /app/test/test_environ.py` are test runs even though no recognized
+# test-framework head appears. Matches a basename of test_*.* / *_test.* or a
+# path component test/ | tests/. Applied only in the EXEC branches of
+# classify_bash_command (python / direct-binary / bash), so reads like
+# `cat test_foo.py` are unaffected.
+_TEST_FILE_RE = re.compile(
+    r"(?:^|/)(?:test_[\w.\-]+|[\w.\-]+_test)\.\w+$"
+    r"|(?:^|/)tests?/"
+)
+
+
+def _mentions_test_file(tokens: list) -> bool:
+    return any(
+        _TEST_FILE_RE.search(t) for t in tokens
+        if isinstance(t, str) and not t.startswith("-")
+    )
+
+
 _FILE_READ_HEADS = {"cat", "head", "tail", "less", "more", "view", "nl", "tac"}
 _FILE_SEARCH_HEADS = {"find", "grep", "rg", "ag", "ack", "ls", "which",
                       "locate", "whereis", "tree"}
@@ -362,13 +436,45 @@ def _strip_envs(tokens: list) -> list:
     return tokens[i:]
 
 
+# Prefix commands that WRAP the real intent in the same chunk (`timeout 10
+# python3 app.py`, `nohup python3 … &`, `exec python3 …`, `env FOO=1 make`).
+# _first_head strips them (plus their own flags / duration args) and
+# re-inspects what follows, so the wrapped command classifies by its intent
+# instead of falling through to TOOL_OTHER.
+_WRAPPER_HEADS = {"timeout", "nohup", "time", "exec", "setsid", "stdbuf",
+                  "env", "unbuffer"}
+
+# Duration-like token consumed by `timeout` (e.g. `timeout 10`, `timeout 5.5s`).
+_DURATION_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?$")
+
+
+def _unwrap_wrappers(tokens: list) -> list:
+    """Strip leading wrapper commands (+ their flags/args) from a token list."""
+    toks = tokens
+    while toks:
+        toks = _strip_envs(toks)
+        if not toks or toks[0] not in _WRAPPER_HEADS:
+            break
+        head = toks[0]
+        toks = toks[1:]
+        # The wrapper's own flags (`timeout -k 5`, `stdbuf -oL`, `env -i`).
+        while toks and toks[0].startswith("-"):
+            toks = toks[1:]
+        if head == "timeout":
+            # Drop the duration argument(s) (`timeout 10`, `timeout -k 5 10`).
+            while toks and _DURATION_TOKEN_RE.fullmatch(toks[0]):
+                toks = toks[1:]
+    return toks
+
+
 def _first_head(command: str) -> tuple:
     """Return (head, tokens_after_head) of the first sub-command in a chained line.
 
     Splits on shell operators (&&, ||, ;, |) and returns the head token of the
     first non-trivial sub-command (skipping `cd` prefixes which are navigation,
-    not the intent). Strips env-var assignments. The returned head is the
-    *intent* of the line for classification purposes.
+    not the intent). Strips env-var assignments and wrapper prefixes
+    (timeout/nohup/exec/…). The returned head is the *intent* of the line for
+    classification purposes.
     """
     if not command:
         return ("", [])
@@ -384,12 +490,20 @@ def _first_head(command: str) -> tuple:
         head = toks[0]
         # Skip pure navigation / no-op prefixes (cd, pwd, env-setters, etc.).
         # These are scaffolding; the real intent of the line is the next chunk.
+        # `eval` is here for its dominant scaffold form `eval $(opam env) && …`
+        # (an eval'd literal command still classifies via the fallback below);
+        # `sleep`/`wait` are here for retry/probe scaffolds like
+        # `sleep 3 && curl …`.
         if head in (
             "cd", "pushd", "popd", "pwd", "set", "export", "unset", "true",
             ":", "source", ".", "umask", "alias", "ulimit",
+            "eval", "sleep", "wait",
         ):
             continue
-        return (head, toks[1:])
+        toks = _unwrap_wrappers(toks)
+        if not toks:
+            continue
+        return (toks[0], toks[1:])
     # All chunks were skips -- fall back to the very first token
     toks = command.strip().split()
     toks = _strip_envs(toks)
@@ -434,6 +548,9 @@ def classify_bash_command(command: str, content: str) -> str:
         # `python -m pip install` -> build/install
         if len(rest) >= 3 and rest[0] == "-m" and rest[1] == "pip" and "install" in rest[2:]:
             return TOOL_BUILD_INSTALL
+        # `python test_foo.py` / `python tests/…` -> test run by filename
+        if _mentions_test_file(rest):
+            return TOOL_TEST_RUN
         # everything else python -> run/exec
         return TOOL_RUN_EXEC
 
@@ -493,11 +610,17 @@ def classify_bash_command(command: str, content: str) -> str:
 
     # 6. Run / exec (interpreters not caught above)
     if head in _RUN_EXEC_HEADS:
+        if _mentions_test_file([head] + rest):
+            return TOOL_TEST_RUN
         return TOOL_RUN_EXEC
     if head.startswith("./") or head.startswith("/"):
         # Direct binary execution
+        if _mentions_test_file([head] + rest):
+            return TOOL_TEST_RUN
         return TOOL_RUN_EXEC
     if head in ("bash", "sh", "zsh", "ksh"):
+        if _mentions_test_file(rest):
+            return TOOL_TEST_RUN
         return TOOL_RUN_EXEC
 
     # 7. Default
@@ -547,6 +670,53 @@ OBSERVATION_CATEGORIES = {
 # would WANT to keep distinguishable for the agent's reasoning; run/exec +
 # other-bash are the high-volume, low-signal repeats (≈29-34% of tokens).
 DEDUPE_OUTPUT_CATEGORIES = {TOOL_RUN_EXEC, TOOL_OTHER}
+
+# Categories participating in run-target supersession (supersede_reruns): the
+# outputs of PROGRAM EXECUTION, whose relevance is tied to the version of the
+# code they ran -- a later run (or edit; that edge rides supersede_reads)
+# touching the same target file makes the earlier output stale. TEST_RUN is in
+# the set but guarded: a test output may only be superseded by a later
+# SUCCESSFUL test run of the same target, preserving the pass/fail trajectory.
+RUN_OUTPUT_CATEGORIES = {
+    TOOL_RUN_EXEC, TOOL_OTHER, TOOL_BUILD_INSTALL, TOOL_TEST_RUN,
+}
+
+# Paths never treated as run TARGETS for supersession: the exec bridge's own
+# snapshot/scratch files live under /tmp and would join every command into one
+# giant equivalence class.
+_RUN_TARGET_EXCLUDE_PREFIXES = ("/tmp/", "/var/folders/")
+
+
+def run_target_files(files_full: set[str]) -> set[str]:
+    """Filter a turn's full-path file set down to run-target candidates."""
+    return {
+        f for f in files_full
+        if f and not f.startswith(_RUN_TARGET_EXCLUDE_PREFIXES)
+    }
+
+
+def observation_is_failure(text: str) -> bool:
+    """True iff a tool observation carries a nonzero exit code.
+
+    Hermes-via-exec-bridge wraps tool results as JSON
+    ``{"output": …, "exit_code": N, "error": …}`` so the exit code is
+    recoverable server-side from the message content alone. Unknown shapes
+    (plain-text output, other harnesses) return False -- i.e. treat as
+    success, the conservative branch for supersession policies.
+    """
+    if not text:
+        return False
+    s = text.lstrip()
+    if not s.startswith("{"):
+        return False
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    ec = obj.get("exit_code")
+    return isinstance(ec, int) and ec != 0
 
 # Minimum normalized-text length before a run/exec / other-bash observation is
 # considered for dedupe. Tiny outputs (empty, a single prompt line, "OK") carry
@@ -683,8 +853,13 @@ def _extract_files_from_messages(new_msgs: list[dict], all_msgs: list[dict]) -> 
                 for f in signals[0].get("file_reads", []):
                     files.add(f)
 
-    # Also extract file paths from tool messages and commands
+    # Also extract file paths from tool messages: the bash command that
+    # produced them AND the structured args of the originating tool call
+    # (`path`/`code` for Hermes read_file/patch/write_file/execute_code --
+    # without this, structured-tool RESULT turns carry no files and can
+    # neither supersede nor be superseded).
     cmd_map = build_tool_call_command_map(all_msgs + new_msgs)
+    args_map = build_tool_call_args_map(all_msgs + new_msgs)
     for msg in new_msgs:
         if msg.get("role") in ("tool", "function"):
             tc_id = msg.get("tool_call_id", "")
@@ -694,6 +869,7 @@ def _extract_files_from_messages(new_msgs: list[dict], all_msgs: list[dict]) -> 
                 for match in _FILE_PATH_RE.findall(command):
                     if match:
                         files.add(match)
+            files.update(extract_files_from_tool_args(args_map.get(tc_id, {})))
 
     return files
 

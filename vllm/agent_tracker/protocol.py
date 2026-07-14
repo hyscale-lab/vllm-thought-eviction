@@ -26,24 +26,43 @@ class AgentTrackerParams(OpenAIBaseModel):
             "engine's prompt_token_ids before generation."
         ),
     )
-    # D-09: per-session N-decay tail-guard window (rounds). When set, overrides
-    # the SessionTracker default (3). Higher = more conservative (spares more
-    # recent rounds before decay-evicting). Swept per-arm via the client's
-    # AGENT_TRACKER_N_DECAY knob; None keeps the server default. The upper bound
-    # is intentionally large so an arm can set n_decay >> trajectory length
-    # (e.g. 999) to effectively DISABLE time-decay and evict purely on
-    # supersession (superseded_by_later_read / _by_edit / _by_repeat).
-    n_decay: int | None = Field(default=None, ge=1, le=9999)
-    # Ablation: also drop the paired assistant "Agent tool call" turn when every
-    # tool-result turn in its round is evicted (serving.py Pass 2). Off by
-    # default so the n_decay/supersession arms drop only tool OUTPUT tokens; the
-    # `droptc` arm sets it to measure the marginal effect of reclaiming the call.
-    evict_tool_call: bool = Field(default=False)
+    # Ablation: file-overlap supersession (superseded_by_later_read /
+    # superseded_by_edit). ON by default -- a later read/edit of a file evicts
+    # the earlier reads/edits of that same file. Set False to DECOUPLE this
+    # mechanism from time-decay, so an arm can measure N-decay in isolation
+    # (or supersession in isolation via n_decay=999 with this left True).
+    # Per-session, locked at tracker creation like n_decay.
+    supersede_reads: bool = Field(default=True)
+    # Ablation: Drop the paired assistant "Agent tool call" turn when every tool-result
+    # turn in its round is evicted (serving.py Pass 2). ON by default
+    # (part of the standard eviction posture alongside supersede_reads). Set
+    # False to drop only tool OUTPUT tokens and leave the paired call in place
+    # (isolates the marginal effect of reclaiming the call).
+    evict_tool_call: bool = Field(default=True)
     # Ablation: content-hash dedupe of repeated command output (run/exec +
     # other-bash). When set, a later turn whose normalized observation text
-    # matches an earlier such turn supersedes it (reason superseded_by_repeat).
+    # matches an earlier such turn supersedes it (reason superseded_by_repeat),
+    # and a rerun of the SAME normalized command supersedes the prior output
+    # even when the output changed (reason superseded_by_rerun, keep-latest).
     # Per-session, locked at tracker creation like n_decay.
     dedupe_cmd_output: bool = Field(default=False)
+    # Ablation: run-target supersession. When set, a later exec-ish observation
+    # (run/exec, other-bash, build, test) whose TARGET FILES overlap a prior
+    # exec-ish observation's supersedes it (reason superseded_by_run_target,
+    # keep-latest) -- the iterative edit->run->traceback loop makes old run
+    # output stale. Test outputs are only superseded by a later SUCCESSFUL test
+    # run of the same target. OFF by default; per-session, locked at tracker
+    # creation like n_decay.
+    supersede_reruns: bool = Field(default=False)
+    # Ablation: Per-session N-decay tail-guard window (rounds). Time-decay is OFF by
+    # default (SessionTracker n_decay=None => decay never fires); an arm opts in
+    # by setting a window via the client's AGENT_TRACKER_N_DECAY knob. Higher =
+    # more conservative (spares more recent rounds before decay-evicting). None
+    # here means "client didn't specify" -> the SessionTracker default (off)
+    # stands. The upper bound is intentionally large so an arm can set n_decay >>
+    # trajectory length (e.g. 999) to keep decay effectively disabled while still
+    # emitting the field.
+    n_decay: int | None = Field(default=None, ge=1, le=9999)
     # Ablation: epoch-batched (cache-friendly) eviction. When set to K>1, NEW
     # evictions are committed to the engine prompt only on requests whose round
     # sits on an epoch boundary (round % K == 0); turns already dropped stay
@@ -73,7 +92,7 @@ class TurnOpportunity(OpenAIBaseModel):
     turn_idx: int
     category: str
     evictable: bool
-    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_repeat | superseded_by_fetch | superseded_by_new_search | decayed_N_turns
+    reason: str  # essential | superseded_by_edit | superseded_by_later_read | superseded_by_repeat | superseded_by_rerun | superseded_by_run_target | superseded_by_fetch | superseded_by_new_search | decayed_N_turns
     msg_range: tuple[int, int]
     token_range: tuple[int, int]
     obs_token_range: tuple[int, int] | None = None
