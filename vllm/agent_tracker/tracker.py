@@ -537,6 +537,7 @@ class SessionTracker:
         supersede_reruns: bool = False,
         evict_web_search: bool = False,
         evict_web_fetch: bool = False,
+        evict_web_fetch_on_new_search: bool = False,
     ) -> None:
         self.session_id = session_id
         # Time-decay is OFF by default (None): _apply_n_decay short-circuits, so
@@ -564,8 +565,17 @@ class SessionTracker:
         #     not-yet-superseded web_search (superseded_by_new_search).
         #   evict_web_fetch: a web_fetch supersedes the web_search turn whose
         #     URL it consumed (superseded_by_fetch).
+        #   evict_web_fetch_on_new_search: a NEW web_search ALSO supersedes
+        #     every earlier not-yet-superseded web_fetch (same reason,
+        #     superseded_by_new_search) -- the "whole prior subtask" version
+        #     of evict_web_search: once the agent starts a new query, the
+        #     fetched pages from the old one go too, not just its search
+        #     snippet. Independent knob so it can be measured separately from
+        #     evict_web_search (evicting old searches) and evict_web_fetch
+        #     (evicting a search once ITS OWN url is fetched).
         self.evict_web_search = evict_web_search
         self.evict_web_fetch = evict_web_fetch
+        self.evict_web_fetch_on_new_search = evict_web_fetch_on_new_search
         self.prev_msg_count = 0
         self.request_idx = 0
         self.file_timeline = FileTimeline()
@@ -1147,6 +1157,13 @@ class SessionTracker:
             fires, every earlier not-yet-superseded web_search is stale,
             REGARDLESS of URL overlap between the two queries -- a rephrased
             query is still "moving past" the old results.
+        (3) A new SEARCH also closes out the prior SUBTASK: once the agent
+            starts a new query, the pages it fetched under the OLD query are
+            typically done too, not just the old search snippet -- e.g. "read
+            the menu, ordered, ate; now the whole table can be cleared."
+            Independent from (2): gated by `evict_web_fetch_on_new_search`,
+            not `evict_web_search`, so evicting old searches vs. evicting old
+            fetched pages can be measured separately.
 
         Mirrors `_reclassify_priors_for_new_turn`'s corrections: only
         OBSERVATION turns are eligible (obs_token_range is not None), and the
@@ -1154,33 +1171,53 @@ class SessionTracker:
         upgraded, matching offline forward-scan semantics).
 
         Each rule is independently gated by its own ablation knob
-        (`self.evict_web_fetch` / `self.evict_web_search`) so the two can be
-        measured separately; both off by default -- the turns are still
+        (`self.evict_web_fetch` / `self.evict_web_search` /
+        `self.evict_web_fetch_on_new_search`) so all three can be measured
+        separately; all off by default -- the turns are still
         classified/tracked either way, only the eviction is gated.
         """
-        if not self.evict_web_search and not self.evict_web_fetch:
+        if not (
+            self.evict_web_search
+            or self.evict_web_fetch
+            or self.evict_web_fetch_on_new_search
+        ):
             return
         new_ts = self.evictable_map[new_turn_idx]
         if new_ts.category not in (TOOL_WEB_SEARCH, TOOL_WEB_FETCH):
             return
         for prior_idx in range(new_turn_idx):
             prior = self.evictable_map[prior_idx]
-            if prior.obs_token_range is None or prior.category != TOOL_WEB_SEARCH:
+            if prior.obs_token_range is None:
+                continue
+            if prior.category not in (TOOL_WEB_SEARCH, TOOL_WEB_FETCH):
                 continue
             if prior.evictable and prior.eviction_reason != "decayed_N_turns":
                 continue
+
             if new_ts.category == TOOL_WEB_FETCH:
-                if self.evict_web_fetch and (
-                    new_ts.urls_referenced & prior.urls_referenced
+                # Rule (1): a fetch only ever supersedes the SEARCH whose URL
+                # it consumed, never another fetch.
+                if (
+                    prior.category == TOOL_WEB_SEARCH
+                    and self.evict_web_fetch
+                    and (new_ts.urls_referenced & prior.urls_referenced)
                 ):
                     prior.evictable = True
                     prior.eviction_reason = "superseded_by_fetch"
                     prior.superseded_by = new_turn_idx
             else:  # new_ts.category == TOOL_WEB_SEARCH
-                if self.evict_web_search:
-                    prior.evictable = True
-                    prior.eviction_reason = "superseded_by_new_search"
-                    prior.superseded_by = new_turn_idx
+                if prior.category == TOOL_WEB_SEARCH:
+                    # Rule (2): old searches.
+                    if self.evict_web_search:
+                        prior.evictable = True
+                        prior.eviction_reason = "superseded_by_new_search"
+                        prior.superseded_by = new_turn_idx
+                else:  # prior.category == TOOL_WEB_FETCH
+                    # Rule (3): old fetched pages from the prior subtask.
+                    if self.evict_web_fetch_on_new_search:
+                        prior.evictable = True
+                        prior.eviction_reason = "superseded_by_new_search"
+                        prior.superseded_by = new_turn_idx
 
     def _dedupe_repeated_output(self, new_turn_idx: int) -> None:
         """Content-hash dedupe of repeated command output (findings doc §5).
@@ -1349,7 +1386,13 @@ class SessionTracker:
           - Tail guard: spare turns within the last n_decay ROUNDS.
           - File-window check: if the turn references files AND any of those
             files appears in a LATER round within n_decay rounds, do NOT decay.
-          - No-files obs turns (e.g. test runs) decay purely by round count.
+          - URL-window check (D-20): same idea for web_search/web_fetch turns,
+            keyed on urls_referenced instead of files_referenced -- a
+            web_search whose URL is fetched (or re-surfaced) within n_decay
+            rounds is not yet decayed, independent of the evict_web_search /
+            evict_web_fetch supersession knobs.
+          - No-files/URLs obs turns (e.g. test runs) decay purely by round
+            count.
         """
         # Time-decay disabled (default): eviction is supersession/dedupe-driven.
         if self.n_decay is None:
@@ -1397,8 +1440,31 @@ class SessionTracker:
                 if not referenced_in_window:
                     ts.evictable = True
                     ts.eviction_reason = "decayed_N_turns"
+            elif ts.urls_referenced:
+                # D-20: URL-aware decay window, mirroring the files_referenced
+                # check above. A web_search's offered URLs (or a web_fetch's
+                # target URL) still being referenced within the next n_decay
+                # rounds means a fetch is about to make use of them -- e.g. a
+                # web_search whose URL gets fetched next round shouldn't decay
+                # out from under supersede_reads-equivalent logic just because
+                # evict_web_fetch happens to be off for this arm. Without this,
+                # web turns fell through to pure round-decay below and ignored
+                # URL relationships entirely.
+                referenced_in_window = False
+                for j in range(i + 1, n):
+                    later = states[j]
+                    if later.round_idx <= ts.round_idx:
+                        continue
+                    if later.round_idx > ts.round_idx + n_decay:
+                        break
+                    if ts.urls_referenced & later.urls_referenced:
+                        referenced_in_window = True
+                        break
+                if not referenced_in_window:
+                    ts.evictable = True
+                    ts.eviction_reason = "decayed_N_turns"
             else:
-                # No files referenced -- pure round-decay (e.g. test runs).
+                # No files/URLs referenced -- pure round-decay (e.g. test runs).
                 ts.evictable = True
                 ts.eviction_reason = "decayed_N_turns"
 
@@ -1561,11 +1627,13 @@ class SessionTrackerRegistry:
         supersede_reads: bool | None = None,
         supersede_reruns: bool | None = None,
         evict_web_search: bool | None = None,
-        evict_web_fetch: bool | None = None, **kwargs
+        evict_web_fetch: bool | None = None,
+        evict_web_fetch_on_new_search: bool | None = None, **kwargs
     ) -> dict:
         self._gc()
         if session_id not in self._sessions:
-            # n_decay / dedupe_cmd_output / supersede_reads / supersede_reruns / evict_web_search / evict_web_fetch
+            # n_decay / dedupe_cmd_output / supersede_reads / supersede_reruns /
+            # evict_web_search / evict_web_fetch / evict_web_fetch_on_new_search
             # (if provided by the client) are per-session knobs, locked at
             # tracker creation; later requests reuse the existing tracker.
             init_kwargs: dict = {}
@@ -1581,17 +1649,23 @@ class SessionTrackerRegistry:
                 init_kwargs["evict_web_search"] = evict_web_search
             if evict_web_fetch is not None:
                 init_kwargs["evict_web_fetch"] = evict_web_fetch
+            if evict_web_fetch_on_new_search is not None:
+                init_kwargs["evict_web_fetch_on_new_search"] = (
+                    evict_web_fetch_on_new_search
+                )
             self._sessions[session_id] = SessionTracker(session_id, **init_kwargs)
             logger.info(
                 "agent_tracker: new session %s (n_decay=%s, dedupe_cmd_output=%s, "
                 "supersede_reads=%s, supersede_reruns=%s, "
-                "evict_web_search=%s, evict_web_fetch=%s)",
+                "evict_web_search=%s, evict_web_fetch=%s, "
+                "evict_web_fetch_on_new_search=%s)",
                 session_id, self._sessions[session_id].n_decay,
                 self._sessions[session_id].dedupe_cmd_output,
                 self._sessions[session_id].supersede_reads,
                 self._sessions[session_id].supersede_reruns,
                 self._sessions[session_id].evict_web_search,
                 self._sessions[session_id].evict_web_fetch,
+                self._sessions[session_id].evict_web_fetch_on_new_search,
             )
         self._sessions.move_to_end(session_id)
         return self._sessions[session_id].observe_request(**kwargs)

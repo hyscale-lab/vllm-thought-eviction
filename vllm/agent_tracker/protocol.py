@@ -85,6 +85,15 @@ class AgentTrackerParams(OpenAIBaseModel):
     # replaces the raw search snippet. Off by default; per-session, locked at
     # tracker creation like n_decay.
     evict_web_fetch: bool = Field(default=False)
+    # Ablation (D-20): a NEW web_search ALSO supersedes every earlier
+    # not-yet-superseded web_fetch turn (reason superseded_by_new_search) --
+    # the "whole prior subtask" version of evict_web_search: once the agent
+    # starts a new query, the pages it fetched under the OLD query go too, not
+    # just the old search snippet. Independent of evict_web_search /
+    # evict_web_fetch so each trigger->target combination can be measured on
+    # its own. Off by default; per-session, locked at tracker creation like
+    # n_decay.
+    evict_web_fetch_on_new_search: bool = Field(default=False)
 
 
 class TurnOpportunity(OpenAIBaseModel):

@@ -366,6 +366,9 @@ class OpenAIServingChat(OpenAIServing):
                     evict_web_fetch=getattr(
                         request.agent_tracker, "evict_web_fetch", None
                     ),
+                    evict_web_fetch_on_new_search=getattr(
+                        request.agent_tracker, "evict_web_fetch_on_new_search", None
+                    ),
                     structured_messages=materialized_messages,
                     prompt_token_ids=prompt_token_ids,
                     message_token_ranges=msg_token_ranges,
