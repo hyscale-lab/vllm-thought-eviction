@@ -191,6 +191,14 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: docker-push
+    name: Build and push Docker image to Docker Hub
+    entry: tools/pre_commit/docker_push.sh
+    language: script
+    stages: [manual] # Never run automatically on commit — invoke by hand; detaches to the background itself
+    pass_filenames: false
+    always_run: true
+    verbose: true
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
